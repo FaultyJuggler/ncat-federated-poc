@@ -2,17 +2,28 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 
 
-def create_global_model():
-    """Create a new RandomForest model with default parameters"""
-    return RandomForestClassifier(
-        n_estimators=100,
-        criterion='gini',
-        max_depth=None,
-        min_samples_split=2,
-        min_samples_leaf=1,
-        bootstrap=True,
-        random_state=42
-    )
+def create_global_model(params=None):
+    """
+    Create a new RandomForest model with provided parameters or defaults
+
+    Args:
+        params: Dictionary of parameters for RandomForestClassifier
+
+    Returns:
+        RandomForestClassifier: Initialized model
+    """
+    if params is None:
+        params = {
+            'n_estimators': 100,
+            'criterion': 'gini',
+            'max_depth': None,
+            'min_samples_split': 2,
+            'min_samples_leaf': 1,
+            'bootstrap': True,
+            'random_state': 42
+        }
+
+    return RandomForestClassifier(**params)
 
 
 def serialize_model(model):
@@ -58,7 +69,15 @@ def merge_forest_weights(models, sample_counts):
         raise ValueError("No models provided for merging")
 
     # Create a new global model
-    global_model = create_global_model()
+    global_model = create_global_model({
+        'n_estimators': models[0].n_estimators,
+        'criterion': models[0].criterion,
+        'max_depth': models[0].max_depth,
+        'min_samples_split': models[0].min_samples_split,
+        'min_samples_leaf': models[0].min_samples_leaf,
+        'bootstrap': models[0].bootstrap,
+        'random_state': 42
+    })
 
     # Calculate the total number of trees and weights per client
     total_samples = sum(sample_counts)

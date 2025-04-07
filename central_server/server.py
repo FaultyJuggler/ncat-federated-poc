@@ -8,6 +8,11 @@ import joblib
 from flask import Flask, jsonify, request, Response
 from model import create_global_model, serialize_model, merge_forest_weights
 from sklearn.ensemble import RandomForestClassifier
+import sys
+
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from platform_utils import detect_platform, optimize_rf_params
 
 # Configure logging
 logging.basicConfig(
@@ -16,11 +21,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("central_server")
 
+# Detect platform and get optimized parameters
+platform_config = detect_platform()
+logger.info(f"Running on detected platform: {platform_config['platform']}")
+
 # Initialize Flask app
 app = Flask(__name__)
 
 # Global variables for FL process
-global_model = create_global_model()
+global_model = None
 client_models = {}
 current_round = 0
 total_rounds = 10
@@ -30,27 +39,35 @@ round_metrics = []
 lock = threading.Lock()  # Thread lock for model updates
 
 
+# Initialize the global model with platform-optimized parameters
+def initialize_global_model():
+    global global_model
+    rf_params = optimize_rf_params(platform_config)
+    logger.info(f"Initializing global model with parameters: {rf_params}")
+    global_model = create_global_model(rf_params)
+
+
 def deserialize_model(serialized_params):
     """Deserialize model from a dictionary and create a new RandomForest classifier"""
     # Create base model with the same parameters
-    model = RandomForestClassifier(
-        n_estimators=serialized_params['params']['n_estimators'],
-        criterion=serialized_params['params']['criterion'],
-        max_depth=serialized_params['params']['max_depth'],
-        min_samples_split=serialized_params['params']['min_samples_split'],
-        min_samples_leaf=serialized_params['params']['min_samples_leaf'],
-        bootstrap=serialized_params['params']['bootstrap'],
-        random_state=42
-    )
+    rf_params = optimize_rf_params(platform_config)
+    rf_params.update({
+        'n_estimators': serialized_params['params']['n_estimators'],
+        'criterion': serialized_params['params']['criterion'],
+        'max_depth': serialized_params['params']['max_depth'],
+        'min_samples_split': serialized_params['params']['min_samples_split'],
+        'min_samples_leaf': serialized_params['params']['min_samples_leaf'],
+        'bootstrap': serialized_params['params']['bootstrap'],
+    })
+
+    model = RandomForestClassifier(**rf_params)
 
     # Manually set classes
     model.classes_ = np.array(serialized_params['classes'])
     model.n_classes_ = serialized_params['n_classes']
     model.n_features_in_ = serialized_params['n_features']
 
-    # Reconstruct trees (simplified - in practice, this is more complex)
-    # Note: This is a simplified approach and may not fully restore the trees
-    # For production, consider using joblib.dumps/loads instead
+    # Fit a simple dataset to initialize internal structures
     model.fit([[0] * model.n_features_in_], [model.classes_[0]])
 
     return model
@@ -90,7 +107,9 @@ def federated_averaging():
 
         # Merge models using weighted voting
         try:
-            global_model = merge_forest_weights(models, sample_counts)
+            # Apply platform-specific optimizations to model merging
+            with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
+                global_model = merge_forest_weights(models, sample_counts)
 
             # Save the global model
             os.makedirs("models", exist_ok=True)
@@ -133,7 +152,8 @@ def get_status():
         "status": "completed" if is_training_complete else "in_progress",
         "current_round": current_round,
         "total_rounds": total_rounds,
-        "connected_clients": list(client_models.keys())
+        "connected_clients": list(client_models.keys()),
+        "platform": platform_config['platform']
     })
 
 
@@ -188,9 +208,18 @@ def get_metrics():
     return jsonify(round_metrics)
 
 
+@app.route('/platform', methods=['GET'])
+def get_platform_info():
+    """Return information about the platform this server is running on"""
+    return jsonify(platform_config)
+
+
 if __name__ == "__main__":
     # Create models directory
     os.makedirs("models", exist_ok=True)
 
-    logger.info("Starting federated learning server with RandomForest...")
+    # Initialize the global model
+    initialize_global_model()
+
+    logger.info(f"Starting federated learning server with RandomForest on platform: {platform_config['platform']}")
     app.run(host='0.0.0.0', port=8080)

@@ -4,12 +4,17 @@ import time
 import logging
 import requests
 import numpy as np
-import pandas as pd
 import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.datasets import fetch_openml
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
+import pandas as pd
+import sys
+
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from platform_utils import detect_platform, optimize_rf_params
 
 # Configure logging
 logging.basicConfig(
@@ -25,6 +30,10 @@ CENTRAL_SERVER = os.getenv("CENTRAL_SERVER", "http://central:8080")
 DATA_SOURCE = os.getenv("DATA_SOURCE", "mnist")  # Options: "mnist", "parquet"
 PARQUET_FILE = os.getenv("PARQUET_FILE", "")
 TARGET_COLUMN = os.getenv("TARGET_COLUMN", "target")
+
+# Detect platform and get optimized parameters
+platform_config = detect_platform()
+logger.info(f"Running on detected platform: {platform_config['platform']}")
 
 # Training parameters
 MAX_RETRIES = 5
@@ -120,24 +129,30 @@ def load_data():
 
 
 def create_model():
-    """Create a new RandomForest model with default parameters"""
-    return RandomForestClassifier(
-        n_estimators=100,
-        criterion='gini',
-        max_depth=None,
-        min_samples_split=2,
-        min_samples_leaf=1,
-        bootstrap=True,
-        random_state=42,
-        n_jobs=-1  # Use all available cores
-    )
+    """Create a new RandomForest model with platform-optimized parameters"""
+    rf_params = optimize_rf_params(platform_config)
+    logger.info(f"Creating RandomForest with optimized parameters: {rf_params}")
+    return RandomForestClassifier(**rf_params)
 
 
 def train_model(model, X_train, y_train):
     """Train the RandomForest model on local data"""
     logger.info(f"Training RandomForest with {len(X_train)} samples...")
+
+    # Use optimized backend for current platform
+    if platform_config['platform'] == 'apple_silicon':
+        backend = 'threading'  # Apple Silicon performs well with threading
+    elif platform_config['platform'] == 'cuda':
+        backend = 'loky'  # Better for CUDA systems
+    else:
+        backend = 'threading'  # Default
+
     start_time = time.time()
-    model.fit(X_train, y_train)
+
+    # Train with platform-specific optimizations
+    with joblib.parallel_backend(backend, n_jobs=platform_config['n_jobs']):
+        model.fit(X_train, y_train)
+
     training_time = time.time() - start_time
     logger.info(f"Training completed in {training_time:.2f} seconds")
     return model
@@ -146,7 +161,11 @@ def train_model(model, X_train, y_train):
 def evaluate_model(model, X_test, y_test):
     """Evaluate the model on test data"""
     logger.info("Evaluating model...")
-    y_pred = model.predict(X_test)
+
+    # Use optimized backend for predictions
+    with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
+        y_pred = model.predict(X_test)
+
     accuracy = accuracy_score(y_test, y_pred)
     logger.info(f"Test accuracy: {accuracy:.4f}")
     logger.info("\nClassification Report:\n" + classification_report(y_test, y_pred))
@@ -165,6 +184,20 @@ def get_server_status():
     except Exception as e:
         logger.error(f"Error getting server status: {e}")
         return None
+
+
+def get_platform_info():
+    """Get platform information from the server"""
+    try:
+        response = requests.get(f"{CENTRAL_SERVER}/platform")
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logger.warning(f"Failed to get platform info: {response.status_code}, {response.text}")
+            return {}
+    except Exception as e:
+        logger.error(f"Error getting platform info: {e}")
+        return {}
 
 
 def get_global_model():
@@ -188,17 +221,21 @@ def get_global_model():
 
 def deserialize_model(serialized_params):
     """Deserialize model from a dictionary and create a new RandomForest classifier"""
-    # Create base model with the same parameters
-    model = RandomForestClassifier(
-        n_estimators=serialized_params['params']['n_estimators'],
-        criterion=serialized_params['params']['criterion'],
-        max_depth=serialized_params['params']['max_depth'],
-        min_samples_split=serialized_params['params']['min_samples_split'],
-        min_samples_leaf=serialized_params['params']['min_samples_leaf'],
-        bootstrap=serialized_params['params']['bootstrap'],
-        random_state=42,
-        n_jobs=-1  # Use all available cores
-    )
+    # Get platform-optimized parameters
+    rf_params = optimize_rf_params(platform_config)
+
+    # Update with parameters from the serialized model
+    rf_params.update({
+        'n_estimators': serialized_params['params']['n_estimators'],
+        'criterion': serialized_params['params']['criterion'],
+        'max_depth': serialized_params['params']['max_depth'],
+        'min_samples_split': serialized_params['params']['min_samples_split'],
+        'min_samples_leaf': serialized_params['params']['min_samples_leaf'],
+        'bootstrap': serialized_params['params']['bootstrap'],
+    })
+
+    # Create model with optimized parameters
+    model = RandomForestClassifier(**rf_params)
 
     return model
 
@@ -208,13 +245,19 @@ def upload_model(model, sample_count, metrics):
     # Save model to a temporary file
     os.makedirs(f"{DATASET_PATH}/models", exist_ok=True)
     model_path = f"{DATASET_PATH}/models/model_{CLIENT_ID}_temp.joblib"
-    joblib.dump(model, model_path)
+
+    # Use compression for model file if on Apple Silicon (better I/O performance)
+    if platform_config['platform'] == 'apple_silicon':
+        joblib.dump(model, model_path, compress=3)
+    else:
+        joblib.dump(model, model_path)
 
     # Prepare metadata
     metadata = {
         "client_id": CLIENT_ID,
         "sample_count": sample_count,
-        "metrics": metrics
+        "metrics": metrics,
+        "platform": platform_config['platform']
     }
 
     for retry in range(MAX_RETRIES):
@@ -249,100 +292,4 @@ def main():
     (X_train, y_train), (X_test, y_test) = load_data()
 
     # Create models directory for saving
-    os.makedirs(f"{DATASET_PATH}/models", exist_ok=True)
-
-    # Wait for server to be ready
-    logger.info("Waiting for server to be ready...")
-    while True:
-        status = get_server_status()
-        if status:
-            logger.info(f"Server is ready. Current round: {status['current_round']}")
-            break
-        time.sleep(5)
-
-    # Participate in federated learning rounds
-    last_round = -1
-
-    while True:
-        # Get current server status
-        status = get_server_status()
-        if not status:
-            logger.warning("Could not get server status. Retrying...")
-            time.sleep(5)
-            continue
-
-        current_round = status['current_round']
-
-        # Check if training is complete
-        if status['status'] == 'completed':
-            logger.info("Federated learning process has completed.")
-            break
-
-        # Skip if we've already done this round
-        if current_round == last_round:
-            logger.info(f"Waiting for next round... (Current: {current_round})")
-            time.sleep(5)
-            continue
-
-        logger.info(f"Starting round {current_round}")
-
-        # Get the global model parameters
-        try:
-            global_model_params = get_global_model()
-
-            # For first round, create a new model, otherwise start with global model params
-            if current_round == 0:
-                model = create_model()
-            else:
-                # For RandomForest, we create a new model with same parameters
-                # but don't try to load the serialized trees (that's complex)
-                model = deserialize_model(global_model_params)
-
-            logger.info("Initialized model for this round")
-        except Exception as e:
-            logger.error(f"Error initializing model: {e}")
-            time.sleep(5)
-            continue
-
-        # Train the model locally
-        try:
-            model = train_model(model, X_train, y_train)
-        except Exception as e:
-            logger.error(f"Error training model: {e}")
-            continue
-
-        # Evaluate the model
-        try:
-            metrics = evaluate_model(model, X_test, y_test)
-        except Exception as e:
-            logger.error(f"Error evaluating model: {e}")
-            metrics = {"accuracy": 0.0}
-
-        # Save model checkpoint
-        checkpoint_path = f"{DATASET_PATH}/models/model_{CLIENT_ID}_round_{current_round}.joblib"
-        joblib.dump(model, checkpoint_path)
-        logger.info(f"Saved checkpoint to {checkpoint_path}")
-
-        # Upload the trained model
-        try:
-            response = upload_model(model, len(X_train), metrics)
-            logger.info(f"Model uploaded successfully: {response}")
-            last_round = current_round
-        except Exception as e:
-            logger.error(f"Failed to upload model: {e}")
-
-        # Small delay before next iteration
-        time.sleep(2)
-
-    # Training complete - save final model
-    final_model_path = f"{DATASET_PATH}/models/final_model_{CLIENT_ID}.joblib"
-    joblib.dump(model, final_model_path)
-    logger.info(f"Final model saved to {final_model_path}")
-
-    # Wait a bit before exiting to ensure logs are flushed
-    time.sleep(2)
-    logger.info("Client process complete")
-
-
-if __name__ == "__main__":
-    main()
+    os.makedirs(f
