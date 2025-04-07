@@ -1,0 +1,80 @@
+version: '3'
+
+services:
+  central:
+    build:
+      context: .
+      dockerfile: docker/central/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./central_server:/app
+    networks:
+      - fl_network
+
+  client1:
+    build:
+      context: .
+      dockerfile: docker/client/Dockerfile
+    environment:
+      - CLIENT_ID=client1
+      - CENTRAL_SERVER=http://central:8080
+      - DATASET_PATH=/data/dataset1
+      - DATA_SOURCE=mnist
+      # Uncomment below to use Parquet data
+      # - DATA_SOURCE=parquet
+      # - PARQUET_FILE=/data/dataset1.parquet
+      # - TARGET_COLUMN=target
+    volumes:
+      - ./client:/app
+      - ./data/client1:/data
+    depends_on:
+      - central
+    networks:
+      - fl_network
+
+  client2:
+    build:
+      context: .
+      dockerfile: docker/client/Dockerfile
+    environment:
+      - CLIENT_ID=client2
+      - CENTRAL_SERVER=http://central:8080
+      - DATASET_PATH=/data/dataset2
+      - DATA_SOURCE=mnist
+      # Uncomment below to use Parquet data
+      # - DATA_SOURCE=parquet
+      # - PARQUET_FILE=/data/dataset2.parquet
+      # - TARGET_COLUMN=target
+    volumes:
+      - ./client:/app
+      - ./data/client2:/data
+    depends_on:
+      - central
+    networks:
+      - fl_network
+
+  client3:
+    build:
+      context: .
+      dockerfile: docker/client/Dockerfile
+    environment:
+      - CLIENT_ID=client3
+      - CENTRAL_SERVER=http://central:8080
+      - DATASET_PATH=/data/dataset3
+      - DATA_SOURCE=mnist
+      # Uncomment below to use Parquet data
+      # - DATA_SOURCE=parquet
+      # - PARQUET_FILE=/data/dataset3.parquet
+      # - TARGET_COLUMN=target
+    volumes:
+      - ./client:/app
+      - ./data/client3:/data
+    depends_on:
+      - central
+    networks:
+      - fl_network
+
+networks:
+  fl_network:
+    driver: bridge
