@@ -36,7 +36,11 @@ DATASET_PATH = os.getenv("DATASET_PATH", "/data")
 CENTRAL_SERVER = os.getenv("CENTRAL_SERVER", "http://central:8080")
 DATA_SOURCE = os.getenv("DATA_SOURCE", "mnist")  # Options: "mnist", "parquet"
 PARQUET_FILE = os.getenv("PARQUET_FILE", "")
-TARGET_COLUMN = os.getenv("TARGET_COLUMN", "target")
+TARGET_COLUMN = os.getenv("TARGET_COLUMN", "label")
+
+# Batch processing settings
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10000"))  # Number of rows to process at once
+USE_PARTIAL_FIT = os.getenv("USE_PARTIAL_FIT", "false").lower() == "true"  # Whether to use partial_fit or not
 
 # Detect platform and get optimized parameters
 platform_config = detect_platform()
@@ -59,143 +63,308 @@ def log_memory_usage():
         logger.warning("psutil not available, skipping memory usage logging")
 
 
-def load_data_from_parquet(file_path, target_column):
-    """Load data from a Parquet file"""
-    logger.info(f"Loading data from Parquet file: {file_path}")
-    log_memory_usage()
+class BatchProcessor:
+    """Class to handle batch processing of Parquet files"""
 
-    try:
-        # Read the Parquet file in batches to save memory
-        # First get file size
-        file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
-        logger.info(f"Parquet file size: {file_size:.2f} MB")
+    def __init__(self, file_path, target_column, batch_size=10000):
+        """Initialize the batch processor"""
+        self.file_path = file_path
+        self.target_column = target_column
+        self.batch_size = batch_size
+        self.total_rows = 0
+        self.feature_cols = []
+        self.categorical_cols = []
+        self.num_features = 0
+        self.has_initialized = False
 
-        # Initialize variables
-        df = None
-        num_rows = 0
-
-        # For very large files, use a more conservative approach
-        if file_size > 1000:  # More than 1GB
-            logger.info("Large file detected, using memory-efficient loading")
-
-            try:
-                # Try using PyArrow for memory efficiency
-                import pyarrow.parquet as pq
-
-                # First just read schema and metadata
-                parquet_file = pq.ParquetFile(file_path)
-                num_rows = parquet_file.metadata.num_rows
-                logger.info(f"Total rows in Parquet file: {num_rows}")
-
-                # For really large datasets, sample a subset
-                if num_rows > 200000:  # Only keep up to 500K rows to avoid memory issues
-                    logger.info(f"Very large dataset detected ({num_rows} rows). Using a sample.")
-                    sample_ratio = min(1.0, 200000 / num_rows)
-                    logger.info(f"Sampling {sample_ratio:.2%} of data")
-
-                    # Read in smaller chunks
-                    batches = []
-                    total_sampled = 0
-
-                    # Determine how many row groups we have
-                    num_row_groups = parquet_file.metadata.num_row_groups
-                    logger.info(f"Found {num_row_groups} row groups in file")
-
-                    # If we have multiple row groups, sample from each
-                    if num_row_groups > 1:
-                        for i in range(num_row_groups):
-                            if np.random.random() > sample_ratio:
-                                continue  # Skip some row groups based on sample ratio
-                            batch = parquet_file.read_row_group(i)
-                            batch_df = batch.to_pandas()
-
-                            # Further sample within the batch if needed
-                            if len(batch_df) > 50000:  # Limit each batch size
-                                batch_df = batch_df.sample(n=50000)
-
-                            batches.append(batch_df)
-                            total_sampled += len(batch_df)
-
-                            if total_sampled >= 500000:
-                                break  # Stop once we have enough samples
-
-                        if batches:
-                            df = pd.concat(batches, ignore_index=True)
-                            logger.info(f"Sampled {len(df)} rows from multiple row groups")
-                    else:
-                        # If only one row group, read it all and sample
-                        df = parquet_file.read().to_pandas()
-                        # Sample the dataframe
-                        if len(df) > 500000:
-                            df = df.sample(n=500000, random_state=42)
-                        logger.info(f"Sampled {len(df)} rows from single row group")
-                else:
-                    # For moderately sized datasets, read the whole file
-                    df = parquet_file.read().to_pandas()
-                    logger.info(f"Loaded all {len(df)} rows")
-
-            except (ImportError, Exception) as e:
-                logger.warning(f"PyArrow read failed: {e}. Falling back to pandas.")
-                # Fall back to pandas for reading
-                df = pd.read_parquet(file_path)
-                num_rows = len(df)
-
-                # Sample if too large
-                if num_rows > 500000:
-                    df = df.sample(n=500000, random_state=42)
-                    logger.info(f"Sampled {len(df)} rows from {num_rows} total rows")
-        else:
-            # For smaller files, read directly using pandas
-            df = pd.read_parquet(file_path)
-            num_rows = len(df)
-            logger.info(f"Loaded all {num_rows} rows directly")
-
-        # Verify df was loaded
-        if df is None or len(df) == 0:
-            logger.error("Failed to load data or empty dataframe")
-            raise ValueError("No data loaded from Parquet file")
-
-        # Verify target column exists
-        if target_column not in df.columns:
-            logger.error(f"Target column '{target_column}' not found. Available columns: {df.columns.tolist()}")
-            raise ValueError(f"Target column '{target_column}' not found in the Parquet file")
-
-        # Extract features and target
-        X = df.drop(columns=[target_column])
-        y = df[target_column]
-
-        # Handle categorical columns by converting to numerical
-        categorical_cols = X.select_dtypes(include=['object', 'category']).columns
-        if not categorical_cols.empty:
-            logger.info(f"Converting {len(categorical_cols)} categorical columns to numerical")
-            X = pd.get_dummies(X, columns=categorical_cols, drop_first=True)
-
-        # Convert to numpy arrays
-        X = X.to_numpy().astype('float32')
-        y = y.to_numpy()
-
-        logger.info(f"Final dataset: {X.shape[0]} samples and {X.shape[1]} features")
+    def initialize(self):
+        """Initialize by reading metadata and preparing for batch processing"""
+        logger.info(f"Initializing batch processor for {self.file_path}")
         log_memory_usage()
 
-        return X, y
+        try:
+            # Use PyArrow to efficiently read metadata
+            import pyarrow.parquet as pq
 
-    except Exception as e:
-        logger.error(f"Error loading Parquet file: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
+            # Get file metadata
+            parquet_file = pq.ParquetFile(self.file_path)
+            self.total_rows = parquet_file.metadata.num_rows
+            logger.info(f"Total rows in Parquet file: {self.total_rows}")
+
+            # Read a small sample to determine schema and datatypes
+            sample = parquet_file.read_row_group(0).to_pandas()
+
+            # Make sure target column exists
+            if self.target_column not in sample.columns:
+                raise ValueError(f"Target column '{self.target_column}' not found in Parquet file")
+
+            # Identify feature columns and categorical columns
+            self.feature_cols = [col for col in sample.columns if col != self.target_column]
+            self.categorical_cols = sample[self.feature_cols].select_dtypes(
+                include=['object', 'category']).columns.tolist()
+
+            logger.info(
+                f"Identified {len(self.feature_cols)} feature columns and {len(self.categorical_cols)} categorical columns")
+
+            # Handle a small sample to determine one-hot encoding columns
+            if self.categorical_cols:
+                # Convert categorical to one-hot
+                sample_x = pd.get_dummies(sample[self.feature_cols], columns=self.categorical_cols, drop_first=True)
+                self.num_features = sample_x.shape[1]
+                logger.info(f"After one-hot encoding: {self.num_features} features")
+            else:
+                self.num_features = len(self.feature_cols)
+
+            self.has_initialized = True
+
+        except Exception as e:
+            logger.error(f"Error initializing batch processor: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+    def get_total_rows(self):
+        """Return the total number of rows in the file"""
+        if not self.has_initialized:
+            self.initialize()
+        return self.total_rows
+
+    def get_num_features(self):
+        """Return the number of features after one-hot encoding"""
+        if not self.has_initialized:
+            self.initialize()
+        return self.num_features
+
+    def batch_iterator(self, max_rows=None):
+        """Generator to yield batches of data from the Parquet file"""
+        if not self.has_initialized:
+            self.initialize()
+
+        import pyarrow.parquet as pq
+        parquet_file = pq.ParquetFile(self.file_path)
+
+        # Determine how many rows to read
+        rows_to_read = min(self.total_rows, max_rows) if max_rows else self.total_rows
+        logger.info(f"Will read up to {rows_to_read} rows in batches of {self.batch_size}")
+
+        rows_read = 0
+        row_group_index = 0
+        df_remainder = None
+
+        while rows_read < rows_to_read and row_group_index < parquet_file.metadata.num_row_groups:
+            # Read a row group
+            try:
+                df = parquet_file.read_row_group(row_group_index).to_pandas()
+                row_group_index += 1
+
+                # Append any remaining rows from previous batch
+                if df_remainder is not None and len(df_remainder) > 0:
+                    df = pd.concat([df_remainder, df], ignore_index=True)
+                    df_remainder = None
+
+                # Process in batch_size chunks
+                start_idx = 0
+                while start_idx < len(df) and rows_read < rows_to_read:
+                    end_idx = min(start_idx + self.batch_size, len(df))
+                    batch_df = df.iloc[start_idx:end_idx]
+
+                    # Process features and target
+                    X_batch = batch_df[self.feature_cols]
+                    y_batch = batch_df[self.target_column]
+
+                    # Handle categorical variables
+                    if self.categorical_cols:
+                        X_batch = pd.get_dummies(X_batch, columns=self.categorical_cols, drop_first=True)
+
+                    # Convert to numpy arrays
+                    X_batch = X_batch.to_numpy().astype('float32')
+                    y_batch = y_batch.to_numpy()
+
+                    batch_rows = len(X_batch)
+                    rows_read += batch_rows
+
+                    yield X_batch, y_batch
+
+                    start_idx += self.batch_size
+
+                # If there's a remainder from this chunk, save it for the next iteration
+                if start_idx < len(df):
+                    df_remainder = df.iloc[start_idx:]
+
+                # Clean up to save memory
+                del df
+
+            except Exception as e:
+                logger.error(f"Error processing row group {row_group_index - 1}: {str(e)}")
+                logger.error(traceback.format_exc())
+                row_group_index += 1  # Skip to next row group on error
+
+        logger.info(f"Completed reading {rows_read} rows from Parquet file")
 
 
-def load_data():
-    """Load dataset for this client and split it based on client ID."""
-    os.makedirs(DATASET_PATH, exist_ok=True)
+def train_model_in_batches(model, batch_processor, max_rows=None):
+    """Train a model using batches of data"""
+    logger.info("Starting batch training...")
+    log_memory_usage()
 
-    # Choose data source based on environment variable
-    if DATA_SOURCE.lower() == "parquet" and PARQUET_FILE:
-        # Load from Parquet file
-        X, y = load_data_from_parquet(PARQUET_FILE, TARGET_COLUMN)
+    total_rows_processed = 0
+    batch_count = 0
+    start_time = time.time()
+
+    # For XGBoost with GPU, we need to collect data first
+    using_xgboost_gpu = (hasattr(model, 'tree_method') and
+                         getattr(model, 'tree_method', '') == 'gpu_hist')
+
+    if using_xgboost_gpu and not USE_PARTIAL_FIT:
+        logger.info("Using XGBoost with GPU - collecting all data for training")
+        # For XGBoost with GPU, we collect all data first
+        all_X = []
+        all_y = []
+
+        for X_batch, y_batch in batch_processor.batch_iterator(max_rows):
+            all_X.append(X_batch)
+            all_y.append(y_batch)
+            batch_count += 1
+            total_rows_processed += len(X_batch)
+
+            if batch_count % 10 == 0:
+                logger.info(f"Loaded {batch_count} batches, {total_rows_processed} rows so far")
+                log_memory_usage()
+
+        # Combine all batches
+        X_train = np.vstack(all_X)
+        y_train = np.concatenate(all_y)
+
+        logger.info(f"Training XGBoost with {len(X_train)} rows and {X_train.shape[1]} features")
+        model.fit(X_train, y_train)
+
     else:
-        # Default to MNIST dataset
-        # Check if data already exists
+        # For other models or if using partial_fit, process in batches
+        # Check if model has partial_fit method or we need standard fit
+        has_partial_fit = hasattr(model, 'partial_fit') and USE_PARTIAL_FIT
+
+        # If model doesn't support partial_fit and we're not forcing standard fit,
+        # we'll collect the data and use a single fit call
+        if not has_partial_fit:
+            logger.info("Model doesn't support partial_fit, collecting all data for fit")
+            all_X = []
+            all_y = []
+
+            for X_batch, y_batch in batch_processor.batch_iterator(max_rows):
+                all_X.append(X_batch)
+                all_y.append(y_batch)
+                batch_count += 1
+                total_rows_processed += len(X_batch)
+
+                if batch_count % 10 == 0:
+                    logger.info(f"Loaded {batch_count} batches, {total_rows_processed} rows so far")
+                    log_memory_usage()
+
+            # Combine all batches
+            X_train = np.vstack(all_X)
+            y_train = np.concatenate(all_y)
+
+            logger.info(f"Training model with {len(X_train)} rows and {X_train.shape[1]} features")
+
+            # Use parallel backend if supported
+            if hasattr(model, 'n_jobs'):
+                with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
+                    model.fit(X_train, y_train)
+            else:
+                model.fit(X_train, y_train)
+
+        else:
+            # For models with partial_fit, train incrementally
+            logger.info("Using partial_fit for incremental training")
+
+            # Get list of classes for supervised classification
+            classes = None
+            if hasattr(model, 'classes_'):
+                classes = model.classes_
+
+            for X_batch, y_batch in batch_processor.batch_iterator(max_rows):
+                batch_count += 1
+                batch_size = len(X_batch)
+
+                # Train on this batch
+                if classes is not None and batch_count == 1:
+                    # For first batch, we need to provide classes
+                    model.partial_fit(X_batch, y_batch, classes=np.unique(y_batch))
+                else:
+                    model.partial_fit(X_batch, y_batch)
+
+                total_rows_processed += batch_size
+
+                if batch_count % 5 == 0:
+                    logger.info(f"Processed {batch_count} batches, {total_rows_processed} rows so far")
+                    log_memory_usage()
+
+    training_time = time.time() - start_time
+    logger.info(f"Training completed in {training_time:.2f} seconds")
+    logger.info(f"Processed {total_rows_processed} rows in {batch_count} batches")
+    log_memory_usage()
+
+    return model
+
+
+def evaluate_model_in_batches(model, batch_processor, max_rows=None):
+    """Evaluate a model using batches of data"""
+    logger.info("Starting batch evaluation...")
+    log_memory_usage()
+
+    total_correct = 0
+    total_rows = 0
+    batch_count = 0
+    start_time = time.time()
+
+    y_true_all = []
+    y_pred_all = []
+
+    for X_batch, y_batch in batch_processor.batch_iterator(max_rows):
+        batch_count += 1
+        batch_size = len(X_batch)
+
+        # Make predictions on this batch
+        if hasattr(model, 'tree_method') and getattr(model, 'tree_method', '') == 'gpu_hist':
+            # XGBoost with GPU
+            y_pred = model.predict(X_batch)
+        else:
+            # Standard model
+            with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
+                y_pred = model.predict(X_batch)
+
+        # Collect true and predicted values for final metrics
+        y_true_all.extend(y_batch)
+        y_pred_all.extend(y_pred)
+
+        # Update counters
+        total_rows += batch_size
+
+        if batch_count % 10 == 0:
+            logger.info(f"Evaluated {batch_count} batches, {total_rows} rows so far")
+
+    # Calculate overall metrics
+    from sklearn.metrics import accuracy_score, classification_report
+    accuracy = accuracy_score(y_true_all, y_pred_all)
+
+    eval_time = time.time() - start_time
+    logger.info(f"Evaluation completed in {eval_time:.2f} seconds")
+    logger.info(f"Processed {total_rows} rows in {batch_count} batches")
+    logger.info(f"Test accuracy: {accuracy:.4f}")
+    logger.info("\nClassification Report:\n" + classification_report(y_true_all, y_pred_all))
+
+    return {"accuracy": accuracy}
+
+
+def load_data_for_batch_processing():
+    """Set up batch processing for data"""
+    if DATA_SOURCE.lower() == "parquet" and PARQUET_FILE:
+        # Initialize batch processor for Parquet file
+        batch_processor = BatchProcessor(PARQUET_FILE, TARGET_COLUMN, BATCH_SIZE)
+        batch_processor.initialize()
+        return batch_processor
+    else:
+        # For MNIST, load the whole dataset as before
+        logger.info("Loading MNIST dataset...")
         X_path = os.path.join(DATASET_PATH, "X.npy")
         y_path = os.path.join(DATASET_PATH, "y.npy")
 
@@ -222,14 +391,37 @@ def load_data():
             np.save(X_path, X)
             np.save(y_path, y)
 
-    # Split data into train and test sets
-    from sklearn.model_selection import train_test_split
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        from sklearn.model_selection import train_test_split
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    logger.info(f"Client {CLIENT_ID} loaded {len(X_train)} training examples and {len(X_test)} test examples")
-    log_memory_usage()
+        # Create a simple batch processor for in-memory data
+        class InMemoryBatchProcessor:
+            def __init__(self, X, y, batch_size):
+                self.X = X
+                self.y = y
+                self.batch_size = batch_size
+                self.total_rows = len(X)
+                self.num_features = X.shape[1]
 
-    return (X_train, y_train), (X_test, y_test)
+            def get_total_rows(self):
+                return self.total_rows
+
+            def get_num_features(self):
+                return self.num_features
+
+            def batch_iterator(self, max_rows=None):
+                rows_to_process = min(self.total_rows, max_rows) if max_rows else self.total_rows
+                for i in range(0, rows_to_process, self.batch_size):
+                    end_idx = min(i + self.batch_size, rows_to_process)
+                    yield self.X[i:end_idx], self.y[i:end_idx]
+
+        # Create train and test batch processors
+        train_processor = InMemoryBatchProcessor(X_train, y_train, BATCH_SIZE)
+        test_processor = InMemoryBatchProcessor(X_test, y_test, BATCH_SIZE)
+
+        logger.info(
+            f"Using in-memory batch processing for MNIST with {len(X_train)} training and {len(X_test)} test examples")
+        return train_processor, test_processor
 
 
 def create_model():
@@ -250,56 +442,6 @@ def create_model():
         from sklearn.ensemble import RandomForestClassifier
         logger.info(f"Creating RandomForest with optimized parameters")
         return RandomForestClassifier(**model_config['params'])
-
-
-def train_model(model, X_train, y_train):
-    """Train the model on local data"""
-    logger.info(f"Training model with {len(X_train)} samples...")
-    log_memory_usage()
-
-    start_time = time.time()
-
-    # Train based on model type
-    if hasattr(model, 'tree_method') and getattr(model, 'tree_method', '') == 'gpu_hist':
-        # XGBoost with GPU
-        model.fit(X_train, y_train)
-    else:
-        # Standard RandomForest or other models
-        if hasattr(model, 'n_jobs'):  # Enable parallel training if supported
-            with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
-                model.fit(X_train, y_train)
-        else:
-            model.fit(X_train, y_train)
-
-    training_time = time.time() - start_time
-    logger.info(f"Training completed in {training_time:.2f} seconds")
-    log_memory_usage()
-    return model
-
-
-def evaluate_model(model, X_test, y_test):
-    """Evaluate the model on test data"""
-    logger.info("Evaluating model...")
-
-    # Use optimized backend for predictions
-    start_time = time.time()
-
-    if hasattr(model, 'tree_method') and getattr(model, 'tree_method', '') == 'gpu_hist':
-        # XGBoost with GPU
-        y_pred = model.predict(X_test)
-    else:
-        # Standard model
-        with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
-            y_pred = model.predict(X_test)
-
-    eval_time = time.time() - start_time
-
-    # Calculate metrics
-    from sklearn.metrics import accuracy_score, classification_report
-    accuracy = accuracy_score(y_test, y_pred)
-    logger.info(f"Test accuracy: {accuracy:.4f} (evaluation took {eval_time:.2f} seconds)")
-    logger.info("\nClassification Report:\n" + classification_report(y_test, y_pred))
-    return {"accuracy": accuracy}
 
 
 def get_server_status():
@@ -442,8 +584,22 @@ def main():
             pass
 
     try:
-        # Load data for this client
-        (X_train, y_train), (X_test, y_test) = load_data()
+        # Load data for this client - now returns batch processors
+        if DATA_SOURCE.lower() == "parquet" and PARQUET_FILE:
+            train_processor = load_data_for_batch_processing()
+            # For parquet, we'll create a separate processor for testing
+            test_processor = BatchProcessor(PARQUET_FILE, TARGET_COLUMN, BATCH_SIZE)
+            test_processor.initialize()
+
+            # Log info about the dataset
+            logger.info(
+                f"Parquet file contains {train_processor.get_total_rows()} rows and {train_processor.get_num_features()} features")
+
+        else:
+            # For MNIST, we get separate train and test processors
+            train_processor, test_processor = load_data_for_batch_processing()
+            logger.info(
+                f"MNIST dataset: {train_processor.get_total_rows()} training rows and {test_processor.get_total_rows()} test rows")
 
         # Create models directory for saving
         os.makedirs(f"{DATASET_PATH}/models", exist_ok=True)
@@ -502,17 +658,24 @@ def main():
                 time.sleep(5)
                 continue
 
-            # Train the model locally
+            # Train the model using batches
             try:
-                model = train_model(model, X_train, y_train)
+                # For large datasets, let's limit how much we train on
+                # This is optional and can be adjusted based on your needs
+                max_train_rows = 500000  # Limit training to 500K rows
+
+                model = train_model_in_batches(model, train_processor, max_train_rows)
             except Exception as e:
                 logger.error(f"Error training model: {e}")
                 logger.error(traceback.format_exc())
                 continue
 
-            # Evaluate the model
+            # Evaluate the model using batches
             try:
-                metrics = evaluate_model(model, X_test, y_test)
+                # For evaluation, we can use a smaller subset
+                max_eval_rows = 100000  # Limit evaluation to 100K rows
+
+                metrics = evaluate_model_in_batches(model, test_processor, max_eval_rows)
             except Exception as e:
                 logger.error(f"Error evaluating model: {e}")
                 metrics = {"accuracy": 0.0}
@@ -524,7 +687,10 @@ def main():
 
             # Upload the trained model
             try:
-                response = upload_model(model, len(X_train), metrics)
+                # Use the total processed rows for sample count
+                sample_count = min(train_processor.get_total_rows(), max_train_rows)
+
+                response = upload_model(model, sample_count, metrics)
                 logger.info(f"Model uploaded successfully: {response}")
                 last_round = current_round
             except Exception as e:
