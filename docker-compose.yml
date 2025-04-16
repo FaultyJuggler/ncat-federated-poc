@@ -9,8 +9,17 @@ services:
       - "8080:8080"
     volumes:
       - ./central_server:/app
+      - ./platform_utils.py:/platform_utils.py
     networks:
       - fl_network
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
 
   client1:
     build:
@@ -19,19 +28,25 @@ services:
     environment:
       - CLIENT_ID=client1
       - CENTRAL_SERVER=http://central:8080
-      - DATASET_PATH=/data/dataset1
-      - DATA_SOURCE=mnist
-      # Uncomment below to use Parquet data
-      # - DATA_SOURCE=parquet
-      # - PARQUET_FILE=/data/dataset1.parquet
-      # - TARGET_COLUMN=target
+      - DATASET_PATH=/data
+      - DATA_SOURCE=parquet
+      - PARQUET_FILE=/data/dataset.parquet
+      - TARGET_COLUMN=label
+      - NVIDIA_VISIBLE_DEVICES=all
     volumes:
       - ./client:/app
       - ./data/client1:/data
+      - ./platform_utils.py:/platform_utils.py
     depends_on:
       - central
     networks:
       - fl_network
+    deploy:
+      resources:
+        limits:
+          memory: 24G
+        reservations:
+          memory: 16G
 
   client2:
     build:
@@ -40,19 +55,25 @@ services:
     environment:
       - CLIENT_ID=client2
       - CENTRAL_SERVER=http://central:8080
-      - DATASET_PATH=/data/dataset2
-      - DATA_SOURCE=mnist
-      # Uncomment below to use Parquet data
-      # - DATA_SOURCE=parquet
-      # - PARQUET_FILE=/data/dataset2.parquet
-      # - TARGET_COLUMN=target
+      - DATASET_PATH=/data
+      - DATA_SOURCE=parquet
+      - PARQUET_FILE=/data/dataset.parquet
+      - TARGET_COLUMN=label
+      - NVIDIA_VISIBLE_DEVICES=all
     volumes:
       - ./client:/app
       - ./data/client2:/data
+      - ./platform_utils.py:/platform_utils.py
     depends_on:
       - central
     networks:
       - fl_network
+    deploy:
+      resources:
+        limits:
+          memory: 24G
+        reservations:
+          memory: 16G
 
   client3:
     build:
@@ -61,19 +82,25 @@ services:
     environment:
       - CLIENT_ID=client3
       - CENTRAL_SERVER=http://central:8080
-      - DATASET_PATH=/data/dataset3
-      - DATA_SOURCE=mnist
-      # Uncomment below to use Parquet data
-      # - DATA_SOURCE=parquet
-      # - PARQUET_FILE=/data/dataset3.parquet
-      # - TARGET_COLUMN=target
+      - DATASET_PATH=/data
+      - DATA_SOURCE=parquet
+      - PARQUET_FILE=/data/dataset.parquet
+      - TARGET_COLUMN=label
+      - NVIDIA_VISIBLE_DEVICES=all
     volumes:
       - ./client:/app
       - ./data/client3:/data
+      - ./platform_utils.py:/platform_utils.py
     depends_on:
       - central
     networks:
       - fl_network
+    deploy:
+      resources:
+        limits:
+          memory: 24G
+        reservations:
+          memory: 16G
 
 networks:
   fl_network:

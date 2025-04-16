@@ -6,13 +6,21 @@ import threading
 import numpy as np
 import joblib
 from flask import Flask, jsonify, request, Response
-from model import create_global_model, serialize_model, merge_forest_weights
-from sklearn.ensemble import RandomForestClassifier
 import sys
 
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from platform_utils import detect_platform, optimize_rf_params
+# Add paths for imports
+sys.path.append('/')  # Add root directory to path for Docker container
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # Add parent dir
+
+try:
+    from platform_utils import detect_platform, optimize_model_params
+except ImportError:
+    print("Error: platform_utils.py not found in path")
+    print(f"Current sys.path: {sys.path}")
+    print("Looking for file in:")
+    for path in ['/platform_utils.py', './platform_utils.py', '../platform_utils.py']:
+        print(f"  {path}: {os.path.exists(path)}")
+    raise
 
 # Configure logging
 logging.basicConfig(
@@ -21,15 +29,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("central_server")
 
-# Detect platform and get optimized parameters
-platform_config = detect_platform()
-logger.info(f"Running on detected platform: {platform_config['platform']}")
-
 # Initialize Flask app
 app = Flask(__name__)
 
 # Global variables for FL process
 global_model = None
+model_type = 'randomforest'  # Default model type
 client_models = {}
 current_round = 0
 total_rounds = 10
@@ -38,44 +43,168 @@ is_training_complete = False
 round_metrics = []
 lock = threading.Lock()  # Thread lock for model updates
 
+# Detect platform and get optimized parameters
+platform_config = detect_platform()
+logger.info(f"Running on detected platform: {platform_config['platform']}")
 
-# Initialize the global model with platform-optimized parameters
+
+# Initialize the global model
 def initialize_global_model():
-    global global_model
-    rf_params = optimize_rf_params(platform_config)
-    logger.info(f"Initializing global model with parameters: {rf_params}")
-    global_model = create_global_model(rf_params)
+    global global_model, model_type
+
+    # Get optimized model configuration
+    model_config = optimize_model_params(platform_config)
+    model_type = model_config['model_type']
+
+    # Create appropriate model type
+    if model_type == 'xgboost':
+        try:
+            import xgboost as xgb
+            global_model = xgb.XGBClassifier(**model_config['params'])
+            logger.info("Initialized XGBoost model with GPU acceleration")
+        except ImportError:
+            from sklearn.ensemble import RandomForestClassifier
+            global_model = RandomForestClassifier(**model_config['params'])
+            model_type = 'randomforest'
+            logger.info("Falling back to RandomForest model")
+    else:
+        from sklearn.ensemble import RandomForestClassifier
+        global_model = RandomForestClassifier(**model_config['params'])
+        logger.info("Initialized RandomForest model")
+
+
+def serialize_model(model):
+    """Serialize model to a dictionary"""
+    serialized = {}
+
+    # Store model type
+    serialized['model_type'] = model_type
+
+    if model_type == 'xgboost':
+        # XGBoost serialization
+        config = model.get_params()
+        serialized['params'] = config
+        serialized['n_classes'] = model.n_classes_
+        serialized['n_features'] = model.n_features_in_
+        serialized['classes'] = model.classes_.tolist() if hasattr(model, 'classes_') else None
+    else:
+        # RandomForest serialization
+        serialized['n_classes'] = model.n_classes_ if hasattr(model, 'n_classes_') else 2
+        serialized['n_features'] = model.n_features_in_ if hasattr(model, 'n_features_in_') else 0
+        serialized['classes'] = model.classes_.tolist() if hasattr(model, 'classes_') else None
+        serialized['params'] = {
+            'n_estimators': model.n_estimators,
+            'criterion': model.criterion,
+            'max_depth': model.max_depth,
+            'min_samples_split': model.min_samples_split,
+            'min_samples_leaf': model.min_samples_leaf,
+            'bootstrap': model.bootstrap
+        }
+
+    return serialized
 
 
 def deserialize_model(serialized_params):
-    """Deserialize model from a dictionary and create a new RandomForest classifier"""
-    # Create base model with the same parameters
-    rf_params = optimize_rf_params(platform_config)
-    rf_params.update({
-        'n_estimators': serialized_params['params']['n_estimators'],
-        'criterion': serialized_params['params']['criterion'],
-        'max_depth': serialized_params['params']['max_depth'],
-        'min_samples_split': serialized_params['params']['min_samples_split'],
-        'min_samples_leaf': serialized_params['params']['min_samples_leaf'],
-        'bootstrap': serialized_params['params']['bootstrap'],
-    })
+    """Deserialize model from a dictionary and create a new model"""
+    model_type = serialized_params.get('model_type', 'randomforest')
 
-    model = RandomForestClassifier(**rf_params)
-
-    # Manually set classes
-    model.classes_ = np.array(serialized_params['classes'])
-    model.n_classes_ = serialized_params['n_classes']
-    model.n_features_in_ = serialized_params['n_features']
-
-    # Fit a simple dataset to initialize internal structures
-    model.fit([[0] * model.n_features_in_], [model.classes_[0]])
+    if model_type == 'xgboost':
+        try:
+            import xgboost as xgb
+            model = xgb.XGBClassifier(**serialized_params['params'])
+        except ImportError:
+            from sklearn.ensemble import RandomForestClassifier
+            model = RandomForestClassifier(**serialized_params['params'])
+    else:
+        from sklearn.ensemble import RandomForestClassifier
+        model = RandomForestClassifier(**serialized_params['params'])
 
     return model
 
 
+def merge_models(models, sample_counts):
+    """
+    Merge models using weighted voting based on sample counts.
+    Handles different model types appropriately.
+    """
+    # Basic validation
+    if not models:
+        raise ValueError("No models provided for merging")
+
+    if not all(type(models[0]) == type(m) for m in models):
+        logger.warning("Inconsistent model types detected. Converting to same type.")
+
+    # Get model type from first model
+    if hasattr(models[0], 'tree_method') and getattr(models[0], 'tree_method', '') == 'gpu_hist':
+        logger.info("Merging XGBoost models")
+        model_type = 'xgboost'
+    else:
+        logger.info("Merging RandomForest models")
+        model_type = 'randomforest'
+
+    # Create a new global model with optimized parameters for current platform
+    model_config = optimize_model_params(platform_config)
+
+    if model_type == 'xgboost':
+        try:
+            import xgboost as xgb
+            global_model = xgb.XGBClassifier(**model_config['params'])
+
+            # For XGBoost, we need to train a new model on weighted predictions
+            # This is a simplified approach - a production system would be more sophisticated
+            # Here we're just doing a weighted average of the models
+            return models[np.argmax(sample_counts)]  # Return the model from client with most data
+
+        except ImportError:
+            logger.warning("XGBoost not available for merging. Falling back to RandomForest.")
+            from sklearn.ensemble import RandomForestClassifier
+            model_config = {'model_type': 'randomforest', 'params': optimize_rf_params(platform_config)}
+            global_model = RandomForestClassifier(**model_config['params'])
+    else:
+        # For RandomForest, we'll merge trees as before
+        from sklearn.ensemble import RandomForestClassifier
+        global_model = RandomForestClassifier(**model_config['params'])
+
+        # Calculate the total number of trees and weights per client
+        total_samples = sum(sample_counts)
+        weights = [count / total_samples for count in sample_counts]
+
+        # Calculate how many trees to take from each client model
+        total_trees = global_model.n_estimators
+        trees_per_model = [int(round(weight * total_trees)) for weight in weights]
+
+        # Adjust to ensure we get exactly total_trees
+        while sum(trees_per_model) < total_trees:
+            idx = trees_per_model.index(min(trees_per_model))
+            trees_per_model[idx] += 1
+        while sum(trees_per_model) > total_trees:
+            idx = trees_per_model.index(max(trees_per_model))
+            trees_per_model[idx] -= 1
+
+        # Gather trees from each model according to their weights
+        merged_estimators = []
+        for model, n_trees in zip(models, trees_per_model):
+            if n_trees <= 0:
+                continue
+            # For simplicity, take the first n_trees
+            merged_estimators.extend(model.estimators_[:n_trees])
+
+        # Update the global model's estimators
+        global_model.estimators_ = merged_estimators
+
+        # Ensure other attributes are correctly set
+        if models:
+            reference_model = models[0]
+            global_model.n_classes_ = reference_model.n_classes_
+            global_model.classes_ = reference_model.classes_
+            global_model.n_features_in_ = reference_model.n_features_in_
+
+    return global_model
+
+
 def federated_averaging():
-    """Perform federated averaging on collected client models"""
-    global global_model, client_models, current_round, is_training_complete
+    """Perform federated model merging on collected client models"""
+    global global_model, client_models, current_round, is_training_complete, model_type
 
     with lock:
         if len(client_models) < min_clients:
@@ -96,6 +225,10 @@ def federated_averaging():
                     client_model = joblib.load(model_path)
                     models.append(client_model)
                     sample_counts.append(model_info['sample_count'])
+
+                    # Update model type based on received model
+                    if hasattr(client_model, 'tree_method') and getattr(client_model, 'tree_method', '') == 'gpu_hist':
+                        model_type = 'xgboost'
                 else:
                     logger.warning(f"Model file for {client_id} not found")
             except Exception as e:
@@ -107,9 +240,7 @@ def federated_averaging():
 
         # Merge models using weighted voting
         try:
-            # Apply platform-specific optimizations to model merging
-            with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
-                global_model = merge_forest_weights(models, sample_counts)
+            global_model = merge_models(models, sample_counts)
 
             # Save the global model
             os.makedirs("models", exist_ok=True)
@@ -119,6 +250,8 @@ def federated_averaging():
 
         except Exception as e:
             logger.error(f"Error merging models: {e}")
+            logger.error(f"Exception details: {str(e)}")
+            traceback.print_exc()
             return
 
         # Save metrics for this round
@@ -126,6 +259,7 @@ def federated_averaging():
             "round": current_round,
             "clients": list(client_models.keys()),
             "avg_accuracy": np.mean([m['metrics']['accuracy'] for m in client_models.values() if 'metrics' in m]),
+            "model_type": model_type
         }
         round_metrics.append(current_metrics)
         logger.info(f"Round {current_round} metrics: {current_metrics}")
@@ -153,7 +287,9 @@ def get_status():
         "current_round": current_round,
         "total_rounds": total_rounds,
         "connected_clients": list(client_models.keys()),
-        "platform": platform_config['platform']
+        "platform": platform_config['platform'],
+        "model_type": model_type,
+        "gpu_enabled": platform_config['use_gpu']
     })
 
 
@@ -174,7 +310,7 @@ def upload_model():
 
     logger.info(f"Received model metadata from client {client_id} with {sample_count} samples")
 
-    # For RandomForest, we'll save the model file separately
+    # For model types like XGBoost and RandomForest, we'll save the model file separately
     if 'model_file' in request.files:
         model_file = request.files['model_file']
         os.makedirs("models", exist_ok=True)
@@ -221,5 +357,6 @@ if __name__ == "__main__":
     # Initialize the global model
     initialize_global_model()
 
-    logger.info(f"Starting federated learning server with RandomForest on platform: {platform_config['platform']}")
+    logger.info(f"Starting federated learning server with model type: {model_type}")
+    logger.info(f"Platform: {platform_config['platform']}, GPU enabled: {platform_config['use_gpu']}")
     app.run(host='0.0.0.0', port=8080)

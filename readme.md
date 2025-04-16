@@ -85,12 +85,12 @@ client1:
 
 1. Start the federated learning system:
    ```bash
-   docker-compose up --build
+   docker compose up --build
    ```
 
 2. Monitor the training process through logs:
    ```bash
-   docker-compose logs -f
+   docker compose logs -f
    ```
 
 3. Visualize training metrics (from host machine):
@@ -193,6 +193,39 @@ For production use:
 - Add secure HTTPS connections
 - Consider implementing differential privacy techniques
 - Add monitoring and logging systems
+
+### Additional Tools
+
+- `partition_large_parquet.py`: Splits a large Parquet file into smaller chunks for distributed training. Now includes enhanced handling for DataFrame schema consistency, threading-based force-exit timer for graceful shutdown, and improved progress tracking.
+
+   ### Partitioning Large Datasets
+
+   If you have a large dataset in Parquet format and need to partition it for the clients, you can use the `partition_large_parquet.py` tool. 
+
+   ```bash
+   cd tools
+   pip install -r requirements.txt
+   python partition_large_parquet.py --input_file <path_to_parquet_file> --output_dir ../data --method row
+   ```
+
+   Key Features:
+   - **Graceful Shutdown Handling**: The tool now listens for interrupts (Ctrl+C) and cleans up resources gracefully. If shutdown times out (after 2.5 minutes), it forces an exit.
+   - **Schema Validation**: Automatically checks and aligns DataFrame schemas with the Parquet file schema. Missing columns are filled with default values to ensure consistency.
+   - **Multithreaded Shutdown Timer**: Implements a timeout mechanism for shutdown, ensuring processing doesn't hang indefinitely.
+   - **Optimized Performance**: Uses an adaptive batch size and multiprocessing for efficient large-scale data partitioning.
+
+   #### Example Output Directory Structure
+   After running the tool, the output will look like:
+```
+data/
+├── client1/
+│ └── dataset.parquet
+├── client2/
+│ └── dataset.parquet
+└── client3/
+└── dataset.parquet
+```
+- **Force Exit During Shutdown**: If the tool cannot complete processing within 2.5 minutes after receiving a shutdown signal, it will forcefully exit and log a timeout message. Ensure your dataset and output directory permissions are set correctly to avoid hangs.
 
 ## License
 
