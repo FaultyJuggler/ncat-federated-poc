@@ -173,7 +173,10 @@ class BatchProcessor:
 
                     # Handle categorical variables
                     if self.categorical_cols:
-                        X_batch = pd.get_dummies(X_batch, columns=self.categorical_cols, drop_first=True)
+                        # X_batch = pd.get_dummies(X_batch, columns=self.categorical_cols, drop_first=True)
+                        for col in self.categorical_cols:
+                            # Convert to numeric using label encoding instead of one-hot
+                            X_batch[col] = pd.factorize(X_batch[col])[0]
 
                     # Convert to numpy arrays
                     X_batch = X_batch.to_numpy().astype('float32')
