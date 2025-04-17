@@ -428,7 +428,11 @@ def create_model():
     """Create a model optimized for the current platform"""
     model_config = optimize_model_params(platform_config)
 
-    if model_config['model_type'] == 'xgboost':
+    if model_config['model_type'] == 'sgd':
+        from sklearn.linear_model import SGDClassifier
+        logger.info("Creating SGDClassifier model")
+        return SGDClassifier(**model_config['params'])
+    elif model_config['model_type'] == 'xgboost':
         try:
             import xgboost as xgb
             logger.info(f"Creating XGBoost model with GPU acceleration")

@@ -131,6 +131,22 @@ def detect_platform():
 
     return config
 
+# SGD classifier
+def optimize_model_params(config):
+    from sklearn.linear_model import SGDClassifier
+
+    return {
+        'model_type': 'sgd',
+        'params': {
+            'loss': 'log_loss',
+            'alpha': 0.0001,
+            'max_iter': 5,
+            'tol': 1e-3,
+            'random_state': 42,
+            'warm_start': True,  # Important for incremental learning
+            'n_jobs': config.get('n_jobs', 1)
+        }
+    }
 
 def optimize_rf_params(config):
     """
