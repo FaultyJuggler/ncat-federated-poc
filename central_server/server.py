@@ -34,7 +34,7 @@ app = Flask(__name__)
 
 # Global variables for FL process
 global_model = None
-model_type = 'randomforest'  # Default model type
+model_type = 'sgd'  # Default model type
 client_models = {}
 current_round = 0
 total_rounds = 10
@@ -52,18 +52,32 @@ logger.info(f"Running on detected platform: {platform_config['platform']}")
 def initialize_global_model():
     global global_model, model_type
 
-    # Force SGDClassifier regardless of what platform_utils recommends
-    from sklearn.linear_model import SGDClassifier
-    global_model = SGDClassifier(
-        loss='log_loss',
-        alpha=0.0001,
-        max_iter=5,
-        tol=0.001,
-        random_state=42,
-        warm_start=True
-    )
-    model_type = 'sgd'
-    logger.info("Initialized SGDClassifier model for memory efficiency")
+    # Get optimized model configuration
+    model_config = optimize_model_params(platform_config)
+    model_type = model_config['model_type']
+
+    # Create appropriate model type
+    if model_type == 'xgboost':
+        try:
+            import xgboost as xgb
+            # Add default num_class parameter
+            params = model_config['params'].copy()
+            if 'num_class' not in params:
+                params['num_class'] = 2  # Default to binary classification
+            global_model = xgb.XGBClassifier(**params)
+            logger.info("Initialized XGBoost model with GPU acceleration")
+        except ImportError:
+            from sklearn.linear_model import SGDClassifier
+            global_model = SGDClassifier(loss='log_loss', alpha=0.0001, max_iter=5,
+                                        tol=0.001, random_state=42, warm_start=True)
+            model_type = 'sgd'
+            logger.info("Falling back to SGDClassifier model")
+    else:
+        from sklearn.linear_model import SGDClassifier
+        global_model = SGDClassifier(loss='log_loss', alpha=0.0001, max_iter=5,
+                                    tol=0.001, random_state=42, warm_start=True)
+        model_type = 'sgd'
+        logger.info("Initialized SGDClassifier model")
 
 
 def serialize_model(model):

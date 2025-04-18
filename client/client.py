@@ -601,7 +601,7 @@ def get_global_model():
 
 def deserialize_model(serialized_params):
     """Deserialize model from a dictionary and create a new model"""
-    model_type = serialized_params.get('model_type', 'randomforest')
+    model_type = serialized_params.get('model_type', 'sgd')
 
     if model_type == 'xgboost' and platform_config['use_gpu']:
         try:
