@@ -1,4 +1,6 @@
-FROM nvidia/cuda:11.3.1-cudnn8-runtime-ubuntu20.04
+FROM rapidsai/rapidsai:22.10-cuda11.2-runtime-ubuntu22.04-py3.9
+
+# Rest of your Dockerfile
 
 # Set non-interactive installation
 ENV DEBIAN_FRONTEND=noninteractive

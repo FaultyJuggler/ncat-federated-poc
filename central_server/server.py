@@ -153,10 +153,294 @@ def serialize_model(model):
 
 
 def deserialize_model(serialized_params):
-    """Deserialize model from a dictionary and create a new model"""
-    model_type = serialized_params.get('model_type', 'randomforest')
+    """
+    Deserialize model parameters into a model object.
+    Uses PyTorch for GPU acceleration when available.
+    """
+    logger.info("Deserializing model...")
 
-    if model_type == 'xgboost':
+    # Get model type, default to 'sgd'
+    model_type = serialized_params.get('model_type', 'sgd')
+    use_gpu = serialized_params.get('use_gpu', platform_config.get('use_gpu', False))
+
+
+    if model_type == 'sgd':
+        try:
+            # Try to use PyTorch if GPU acceleration is requested
+            if use_gpu:
+                try:
+                    import torch
+                    import numpy as np
+                    from sklearn.base import BaseEstimator, ClassifierMixin
+                    from sklearn.preprocessing import StandardScaler
+                    from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
+                    from sklearn.utils.multiclass import unique_labels
+
+                    class PyTorchSGDClassifier(BaseEstimator, ClassifierMixin):
+                        """PyTorch-based SGD classifier with scikit-learn compatible API."""
+
+                        def __init__(self, loss='log_loss', penalty='l2', alpha=0.0001,
+                                     max_iter=1000, tol=1e-3, random_state=42,
+                                     learning_rate=0.01, batch_size=1000):
+                            self.loss = loss
+                            self.penalty = penalty
+                            self.alpha = alpha
+                            self.max_iter = max_iter
+                            self.tol = tol
+                            self.random_state = random_state
+                            self.learning_rate = learning_rate
+                            self.batch_size = batch_size
+
+                            # Set GPU device if available
+                            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                            logger.info(f"PyTorch using device: {self.device}")
+
+                            # Initialize model components
+                            self.model = None
+                            self.optimizer = None
+                            self.scaler = StandardScaler()
+                            self.classes_ = None
+                            self.n_features_in_ = None
+                            self.initialized_ = False
+
+                            # Set random seed for reproducibility
+                            torch.manual_seed(self.random_state)
+                            if torch.cuda.is_available():
+                                torch.cuda.manual_seed(self.random_state)
+
+                        def _initialize_model(self, n_features, n_classes):
+                            """Initialize PyTorch model and optimizer."""
+                            # For binary classification
+                            out_features = 1 if n_classes <= 2 else n_classes
+
+                            # Create model
+                            self.model = torch.nn.Sequential(
+                                torch.nn.Linear(n_features, out_features)
+                            ).to(self.device)
+
+                            # Setup optimizer with regularization
+                            weight_decay = self.alpha if self.penalty == 'l2' else 0
+                            self.optimizer = torch.optim.SGD(
+                                self.model.parameters(),
+                                lr=self.learning_rate,
+                                weight_decay=weight_decay
+                            )
+
+                            # Set loss function
+                            if self.loss == 'log_loss' or self.loss == 'log':
+                                self.criterion = torch.nn.BCEWithLogitsLoss() if out_features == 1 else torch.nn.CrossEntropyLoss()
+                            elif self.loss == 'hinge':
+                                self.criterion = torch.nn.MultiMarginLoss()
+                            else:
+                                raise ValueError(f"Unsupported loss: {self.loss}")
+
+                            self.initialized_ = True
+
+                        def _prepare_data(self, X, y=None):
+                            """Convert numpy arrays to PyTorch tensors."""
+                            X_tensor = torch.FloatTensor(X).to(self.device)
+
+                            if y is not None:
+                                if len(self.classes_) <= 2:  # Binary classification
+                                    y_tensor = torch.FloatTensor(y).to(self.device)
+                                else:  # Multiclass classification
+                                    y_tensor = torch.LongTensor(y).to(self.device)
+                                return X_tensor, y_tensor
+
+                            return X_tensor
+
+                        def fit(self, X, y):
+                            """Fit model to the data."""
+                            # Check and validate input data
+                            X, y = check_X_y(X, y)
+                            self.classes_ = unique_labels(y)
+                            self.n_features_in_ = X.shape[1]
+
+                            # Scale features
+                            X = self.scaler.fit_transform(X)
+
+                            # Convert class labels to indices for multiclass
+                            if len(self.classes_) > 2:
+                                y_mapped = np.searchsorted(self.classes_, y)
+                            else:
+                                # For binary classification, convert to 0/1
+                                y_mapped = (y == self.classes_[1]).astype(np.float32)
+
+                            # Initialize the PyTorch model if not already done
+                            if not self.initialized_:
+                                self._initialize_model(self.n_features_in_, len(self.classes_))
+
+                            # Convert to PyTorch tensors
+                            X_tensor, y_tensor = self._prepare_data(X, y_mapped)
+
+                            # Training loop
+                            self.model.train()
+                            n_samples = X.shape[0]
+
+                            for epoch in range(self.max_iter):
+                                total_loss = 0
+                                # Mini-batch training
+                                for i in range(0, n_samples, self.batch_size):
+                                    batch_X = X_tensor[i:i + self.batch_size]
+                                    batch_y = y_tensor[i:i + self.batch_size]
+
+                                    # Forward pass
+                                    self.optimizer.zero_grad()
+                                    outputs = self.model(batch_X)
+
+                                    # Reshape output for binary classification
+                                    if len(self.classes_) <= 2:
+                                        outputs = outputs.squeeze()
+
+                                    # Compute loss and backward pass
+                                    loss = self.criterion(outputs, batch_y)
+                                    loss.backward()
+                                    self.optimizer.step()
+
+                                    total_loss += loss.item()
+
+                                # Check convergence
+                                avg_loss = total_loss / (n_samples / self.batch_size)
+                                if epoch > 0 and avg_loss < self.tol:
+                                    logger.info(f"Converged after {epoch + 1} epochs. Loss: {avg_loss:.6f}")
+                                    break
+
+                                if (epoch + 1) % 10 == 0:
+                                    logger.debug(f"Epoch {epoch + 1}/{self.max_iter}, Loss: {avg_loss:.6f}")
+
+                            return self
+
+                        def partial_fit(self, X, y, classes=None):
+                            """Incremental fit on a batch of samples."""
+                            if classes is not None:
+                                self.classes_ = classes
+
+                            # Initialize the model if this is the first call
+                            if not hasattr(self, 'classes_') or self.classes_ is None:
+                                self.classes_ = unique_labels(y)
+
+                            if not self.initialized_:
+                                self.n_features_in_ = X.shape[1]
+                                self._initialize_model(self.n_features_in_, len(self.classes_))
+
+                            # Scale features
+                            if not hasattr(self, 'scaler_fitted_'):
+                                X = self.scaler.fit_transform(X)
+                                self.scaler_fitted_ = True
+                            else:
+                                X = self.scaler.transform(X)
+
+                            # Convert class labels
+                            if len(self.classes_) > 2:
+                                y_mapped = np.searchsorted(self.classes_, y)
+                            else:
+                                y_mapped = (y == self.classes_[1]).astype(np.float32)
+
+                            # Convert to PyTorch tensors
+                            X_tensor, y_tensor = self._prepare_data(X, y_mapped)
+
+                            # Training
+                            self.model.train()
+                            self.optimizer.zero_grad()
+                            outputs = self.model(X_tensor)
+
+                            # Reshape output for binary classification
+                            if len(self.classes_) <= 2:
+                                outputs = outputs.squeeze()
+
+                            loss = self.criterion(outputs, y_tensor)
+                            loss.backward()
+                            self.optimizer.step()
+
+                            return self
+
+                        def predict_proba(self, X):
+                            """Return probability estimates for samples."""
+                            check_is_fitted(self, ['classes_', 'initialized_'])
+                            X = check_array(X)
+                            X = self.scaler.transform(X)
+
+                            # Convert to PyTorch tensor
+                            X_tensor = self._prepare_data(X)
+
+                            # Prediction
+                            self.model.eval()
+                            with torch.no_grad():
+                                outputs = self.model(X_tensor)
+
+                                if len(self.classes_) <= 2:  # Binary classification
+                                    outputs = outputs.squeeze()
+                                    proba = torch.sigmoid(outputs).cpu().numpy()
+                                    return np.vstack((1 - proba, proba)).T
+                                else:  # Multiclass
+                                    proba = torch.softmax(outputs, dim=1).cpu().numpy()
+                                    return proba
+
+                        def predict(self, X):
+                            """Return predicted class labels for samples in X."""
+                            proba = self.predict_proba(X)
+                            return self.classes_[np.argmax(proba, axis=1)]
+
+                        def get_params(self, deep=True):
+                            """Get parameters for this estimator."""
+                            return {
+                                'loss': self.loss,
+                                'penalty': self.penalty,
+                                'alpha': self.alpha,
+                                'max_iter': self.max_iter,
+                                'tol': self.tol,
+                                'random_state': self.random_state,
+                                'learning_rate': self.learning_rate,
+                                'batch_size': self.batch_size
+                            }
+
+                        def set_params(self, **parameters):
+                            """Set parameters for this estimator."""
+                            for parameter, value in parameters.items():
+                                setattr(self, parameter, value)
+                            return self
+
+                    # Extract SGD-specific parameters
+                    sgd_params = {
+                        'loss': serialized_params.get('loss', 'log_loss'),
+                        'penalty': serialized_params.get('penalty', 'l2'),
+                        'alpha': serialized_params.get('alpha', 0.0001),
+                        'max_iter': serialized_params.get('max_iter', 1000),
+                        'tol': serialized_params.get('tol', 1e-3),
+                        'random_state': serialized_params.get('random_state', 42),
+                        'learning_rate': serialized_params.get('learning_rate', 0.01),
+                        'batch_size': serialized_params.get('batch_size', 1000)
+                    }
+
+                    logger.info("Creating PyTorch GPU-accelerated SGD classifier")
+                    return PyTorchSGDClassifier(**sgd_params)
+
+                except ImportError:
+                    logger.warning("GPU acceleration requested but PyTorch not available. Falling back to CPU SGD.")
+
+            # CPU-based scikit-learn SGD
+            from sklearn.linear_model import SGDClassifier
+
+            # Extract SGD-specific parameters for scikit-learn
+            sgd_params = {
+                'loss': serialized_params.get('loss', 'log_loss'),  # Updated from 'log' for newer sklearn
+                'penalty': serialized_params.get('penalty', 'l2'),
+                'alpha': serialized_params.get('alpha', 0.0001),
+                'max_iter': serialized_params.get('max_iter', 1000),
+                'tol': serialized_params.get('tol', 1e-3),
+                'random_state': serialized_params.get('random_state', 42),
+                'warm_start': True  # Enables incremental learning across model updates
+            }
+
+            logger.info("Creating CPU SGD classifier")
+            return SGDClassifier(**sgd_params)
+
+        except Exception as e:
+            logger.error(f"Error creating SGD model: {e}")
+            raise
+
+
+    elif model_type == 'xgboost':
         try:
             import xgboost as xgb
             model = xgb.XGBClassifier(**serialized_params['params'])

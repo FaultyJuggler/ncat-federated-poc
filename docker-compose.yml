@@ -1,4 +1,4 @@
-version: '3'
+version: '3.8'
 
 services:
   central:
@@ -18,8 +18,13 @@ services:
           memory: 16G
         reservations:
           memory: 8G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_VISIBLE_DEVICES=0
+      - USE_GPU=true
 
   client1:
     build:
@@ -32,10 +37,12 @@ services:
       - DATA_SOURCE=parquet
       - PARQUET_FILE=/data/dataset.parquet
       - TARGET_COLUMN=label
-      - NVIDIA_VISIBLE_DEVICES=all
-      - BATCH_SIZE=500
+      - NVIDIA_VISIBLE_DEVICES=1
+      - CUDA_VISIBLE_DEVICES=0
+      - BATCH_SIZE=2000
       - MAX_ROWS=50000
       - USE_PARTIAL_FIT=true
+      - USE_GPU=true
     volumes:
       - ./client:/app
       - ./data/client1:/data
@@ -50,6 +57,11 @@ services:
           memory: 40G
         reservations:
           memory: 24G
+          devices:
+            - driver: nvidia
+              count: 1
+              device_ids: ['1']
+              capabilities: [gpu]
 
   client2:
     build:
@@ -62,10 +74,12 @@ services:
       - DATA_SOURCE=parquet
       - PARQUET_FILE=/data/dataset.parquet
       - TARGET_COLUMN=label
-      - NVIDIA_VISIBLE_DEVICES=all
-      - BATCH_SIZE=500
+      - NVIDIA_VISIBLE_DEVICES=2
+      - CUDA_VISIBLE_DEVICES=0
+      - BATCH_SIZE=2000
       - MAX_ROWS=50000
       - USE_PARTIAL_FIT=true
+      - USE_GPU=true
     volumes:
       - ./client:/app
       - ./data/client2:/data
@@ -80,6 +94,11 @@ services:
           memory: 40G
         reservations:
           memory: 24G
+          devices:
+            - driver: nvidia
+              count: 1
+              device_ids: ['2']
+              capabilities: [gpu]
 
   client3:
     build:
@@ -92,10 +111,12 @@ services:
       - DATA_SOURCE=parquet
       - PARQUET_FILE=/data/dataset.parquet
       - TARGET_COLUMN=label
-      - NVIDIA_VISIBLE_DEVICES=all
-      - BATCH_SIZE=500
+      - NVIDIA_VISIBLE_DEVICES=3
+      - CUDA_VISIBLE_DEVICES=0
+      - BATCH_SIZE=2000
       - MAX_ROWS=50000
       - USE_PARTIAL_FIT=true
+      - USE_GPU=true
     volumes:
       - ./client:/app
       - ./data/client3:/data
@@ -110,6 +131,11 @@ services:
           memory: 40G
         reservations:
           memory: 24G
+          devices:
+            - driver: nvidia
+              count: 1
+              device_ids: ['3']
+              capabilities: [gpu]
 
 networks:
   fl_network:
