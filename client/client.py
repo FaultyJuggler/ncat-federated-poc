@@ -689,7 +689,8 @@ def main():
     """Main function to run the client in the federated learning process"""
     # Log GPU status
     if platform_config['use_gpu']:
-        logger.info(f"GPU acceleration enabled: {platform_config['gpu_count']} GPUs detected")
+        gpu_count = platform_config.get('gpu_count', os.environ.get('GPU_COUNT', 1))
+        logger.info(f"GPU acceleration enabled: {gpu_count} GPUs detected")
 
         # Check GPU devices if PyTorch is available
         try:
