@@ -318,6 +318,8 @@ def train_model_in_batches(model, batch_processor, max_rows=None):
 
     log_memory_usage()
 
+    logger.info(
+        f"Memory usage: {memory_usage_percent():.1f}% ({memory_used_mb():.1f}MB used out of {memory_total_mb():.1f}MB)")
     logger.info("Using partial_fit for incremental training")
 
     total_rows_processed = 0
@@ -331,28 +333,29 @@ def train_model_in_batches(model, batch_processor, max_rows=None):
         for X_batch, y_batch in batch_processor.batch_iterator():
             batch_size = X_batch.shape[0]
 
-            if max_rows and total_rows_processed + batch_size > max_rows:
+            if max_rows and total_processed + batch_size > max_rows:
                 # Trim the batch to respect max_rows
-                rows_to_take = max_rows - total_rows_processed
+                rows_to_take = max_rows - total_processed
                 X_batch = X_batch[:rows_to_take]
                 y_batch = y_batch[:rows_to_take]
                 batch_size = rows_to_take
 
             # On first batch, pass the classes parameter
-            if batch_count == 0:
+            if first_batch:
                 model.partial_fit(X_batch, y_batch, classes=all_classes)
+                first_batch = False
                 logger.info(f"First batch processed with classes: {all_classes}")
             else:
                 model.partial_fit(X_batch, y_batch)
 
-            total_rows_processed += batch_size
-            logger.info(f"Processed batch: {batch_size} samples, total: {total_rows_processed}")
+            total_processed += batch_size
+            logger.info(f"Processed batch: {batch_size} samples, total: {total_processed}")
 
-            if max_rows and total_rows_processed >= max_rows:
+            if max_rows and total_processed >= max_rows:
                 logger.info(f"Reached max_rows limit ({max_rows}), stopping training")
                 break
 
-        logger.info(f"Completed batch training, processed {total_rows_processed} samples")
+        logger.info(f"Completed batch training, processed {total_processed} samples")
         training_time = time.time() - start_time
         logger.info(f"Training completed in {training_time:.2f} seconds")
         logger.info(f"Processed {total_rows_processed} rows in {batch_count} batches")
@@ -653,7 +656,8 @@ def upload_model(model, sample_count, metrics):
                     f"{CENTRAL_SERVER}/upload",
                     files=files,
                     data={'json': json.dumps(metadata)},
-                    json=metadata
+                    json=metadata,
+                    headers={'Content-Type': 'application/json'}
                 )
 
             if response.status_code == 200:

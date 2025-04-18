@@ -31,17 +31,24 @@ def fetch_metrics():
 
 
 def fetch_status():
-    """Fetch current status from the central server"""
+    """Fetch current server status"""
     try:
-        response = requests.get(f"{SERVER_URL}/status")
+        response = requests.get(f"{SERVER_URL}/status", timeout=5)
         if response.status_code == 200:
             return response.json()
         else:
             print(f"Error fetching status: {response.status_code}")
-            return {}
-    except Exception as e:
-        print(f"Exception while fetching status: {e}")
-        return {}
+            return {"status": "error", "message": f"HTTP error {response.status_code}"}
+    except requests.exceptions.RequestException as e:
+        print(f"Request exception: {e}")
+        return {"status": "error", "message": str(e)}
+
+# Add debugging to see what's being returned
+def fetch_status_with_debug():
+    """Fetch current server status with debugging"""
+    status = fetch_status()
+    print(f"DEBUG - Server status response: {status}")
+    return status
 
 
 def update_plot(frame):
