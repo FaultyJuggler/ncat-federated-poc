@@ -78,27 +78,68 @@ def serialize_model(model):
     serialized = {}
 
     # Store model type
-    serialized['model_type'] = model_type
-
-    if model_type == 'xgboost':
-        # XGBoost serialization
-        config = model.get_params()
-        serialized['params'] = config
-        serialized['n_classes'] = model.n_classes_
-        serialized['n_features'] = model.n_features_in_
-        serialized['classes'] = model.classes_.tolist() if hasattr(model, 'classes_') else None
+    if hasattr(model, 'tree_method') and getattr(model, 'tree_method', '') == 'gpu_hist':
+        serialized['model_type'] = 'xgboost'
     else:
-        # RandomForest serialization
+        serialized['model_type'] = 'sgd'  # or 'randomforest' depending on your model
+
+    # For XGBoost models
+    if serialized['model_type'] == 'xgboost':
+        try:
+            import xgboost as xgb
+            if isinstance(model, xgb.XGBClassifier):
+                # XGBoost models have different attributes
+                serialized['params'] = model.get_params()
+
+                # XGBoost might not have n_classes_ attribute yet (before fit)
+                if hasattr(model, 'n_classes_'):
+                    serialized['n_classes'] = model.n_classes_
+                else:
+                    # Default to binary classification if not known
+                    serialized['n_classes'] = 2
+
+                if hasattr(model, 'n_features_in_'):
+                    serialized['n_features'] = model.n_features_in_
+                else:
+                    serialized['n_features'] = 0
+
+                if hasattr(model, 'classes_'):
+                    serialized['classes'] = model.classes_.tolist()
+                else:
+                    serialized['classes'] = None
+        except Exception as e:
+            logger.error(f"Error serializing XGBoost model: {str(e)}")
+            # Provide defaults
+            serialized['params'] = {}
+            serialized['n_classes'] = 2
+            serialized['n_features'] = 0
+            serialized['classes'] = None
+    elif serialized['model_type'] == 'sgd':
+        # For SGD Classifier
+        serialized['n_classes'] = model.classes_.shape[0] if hasattr(model, 'classes_') else 2
+        serialized['n_features'] = model.n_features_in_ if hasattr(model, 'n_features_in_') else 0
+        serialized['classes'] = model.classes_.tolist() if hasattr(model, 'classes_') else None
+        serialized['params'] = {
+            'loss': getattr(model, 'loss', 'log_loss'),
+            'penalty': getattr(model, 'penalty', 'l2'),
+            'alpha': getattr(model, 'alpha', 0.0001),
+            'max_iter': getattr(model, 'max_iter', 5),
+            'tol': getattr(model, 'tol', 0.001),
+            'random_state': getattr(model, 'random_state', 42),
+            'warm_start': getattr(model, 'warm_start', True)
+        }
+    else:
+        # RandomForest serialization (original code)
         serialized['n_classes'] = model.n_classes_ if hasattr(model, 'n_classes_') else 2
         serialized['n_features'] = model.n_features_in_ if hasattr(model, 'n_features_in_') else 0
         serialized['classes'] = model.classes_.tolist() if hasattr(model, 'classes_') else None
         serialized['params'] = {
-            'n_estimators': model.n_estimators,
-            'criterion': model.criterion,
-            'max_depth': model.max_depth,
-            'min_samples_split': model.min_samples_split,
-            'min_samples_leaf': model.min_samples_leaf,
-            'bootstrap': model.bootstrap
+            'n_estimators': getattr(model, 'n_estimators', 100),
+            'criterion': getattr(model, 'criterion', 'gini'),
+            'max_depth': getattr(model, 'max_depth', None),
+            'min_samples_split': getattr(model, 'min_samples_split', 2),
+            'min_samples_leaf': getattr(model, 'min_samples_leaf', 1),
+            'bootstrap': getattr(model, 'bootstrap', True)
         }
 
     return serialized
