@@ -331,9 +331,9 @@ def train_model_in_batches(model, batch_processor, max_rows=None):
         for X_batch, y_batch in batch_processor.batch_iterator():
             batch_size = X_batch.shape[0]
 
-            if max_rows and total_processed + batch_size > max_rows:
+            if max_rows and total_rows_processed + batch_size > max_rows:
                 # Trim the batch to respect max_rows
-                rows_to_take = max_rows - total_processed
+                rows_to_take = max_rows - total_rows_processed
                 X_batch = X_batch[:rows_to_take]
                 y_batch = y_batch[:rows_to_take]
                 batch_size = rows_to_take
@@ -346,14 +346,14 @@ def train_model_in_batches(model, batch_processor, max_rows=None):
             else:
                 model.partial_fit(X_batch, y_batch)
 
-            total_processed += batch_size
-            logger.info(f"Processed batch: {batch_size} samples, total: {total_processed}")
+            total_rows_processed += batch_size
+            logger.info(f"Processed batch: {batch_size} samples, total: {total_rows_processed}")
 
-            if max_rows and total_processed >= max_rows:
+            if max_rows and total_rows_processed >= max_rows:
                 logger.info(f"Reached max_rows limit ({max_rows}), stopping training")
                 break
 
-        logger.info(f"Completed batch training, processed {total_processed} samples")
+        logger.info(f"Completed batch training, processed {total_rows_processed} samples")
         training_time = time.time() - start_time
         logger.info(f"Training completed in {training_time:.2f} seconds")
         logger.info(f"Processed {total_rows_processed} rows in {batch_count} batches")
