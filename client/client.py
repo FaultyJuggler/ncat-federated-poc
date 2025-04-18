@@ -314,13 +314,38 @@ def train_model_in_batches(model, batch_processor, max_rows=None):
     batch_count = 0
     start_time = time.time()
 
-    # For XGBoost with GPU, we need to collect data first
-    using_xgboost_gpu = (hasattr(model, 'tree_method') and
-                         getattr(model, 'tree_method', '') == 'gpu_hist')
+    # Check if the model is SGD or has partial_fit
+    has_partial_fit = hasattr(model, 'partial_fit') and USE_PARTIAL_FIT
 
-    if using_xgboost_gpu and not USE_PARTIAL_FIT:
-        logger.info("Using XGBoost with GPU - collecting all data for training")
-        # For XGBoost with GPU, we collect all data first
+    # For most models (including SGD), process in batches
+    if has_partial_fit:
+        # For models with partial_fit, train incrementally
+        logger.info("Using partial_fit for incremental training")
+
+        # Get list of classes for supervised classification
+        classes = None
+        if hasattr(model, 'classes_'):
+            classes = model.classes_
+
+        for X_batch, y_batch in batch_processor.batch_iterator(max_rows):
+            batch_count += 1
+            batch_size = len(X_batch)
+
+            # Train on this batch
+            if classes is not None and batch_count == 1:
+                # For first batch, we need to provide classes
+                model.partial_fit(X_batch, y_batch, classes=np.unique(y_batch))
+            else:
+                model.partial_fit(X_batch, y_batch)
+
+            total_rows_processed += batch_size
+
+            if batch_count % 5 == 0:
+                logger.info(f"Processed {batch_count} batches, {total_rows_processed} rows so far")
+                log_memory_usage()
+    else:
+        # If model doesn't support partial_fit, collect all data for standard fit
+        logger.info("Model doesn't support partial_fit, collecting all data for fit")
         all_X = []
         all_y = []
 
@@ -338,77 +363,20 @@ def train_model_in_batches(model, batch_processor, max_rows=None):
         X_train = np.vstack(all_X)
         y_train = np.concatenate(all_y)
 
-        logger.info(f"Training XGBoost with {len(X_train)} rows and {X_train.shape[1]} features")
-        model.fit(X_train, y_train)
+        logger.info(f"Training model with {len(X_train)} rows and {X_train.shape[1]} features")
 
-    else:
-        # For other models or if using partial_fit, process in batches
-        # Check if model has partial_fit method or we need standard fit
-        has_partial_fit = hasattr(model, 'partial_fit') and USE_PARTIAL_FIT
-
-        # If model doesn't support partial_fit and we're not forcing standard fit,
-        # we'll collect the data and use a single fit call
-        if not has_partial_fit:
-            logger.info("Model doesn't support partial_fit, collecting all data for fit")
-            all_X = []
-            all_y = []
-
-            for X_batch, y_batch in batch_processor.batch_iterator(max_rows):
-                all_X.append(X_batch)
-                all_y.append(y_batch)
-                batch_count += 1
-                total_rows_processed += len(X_batch)
-
-                if batch_count % 10 == 0:
-                    logger.info(f"Loaded {batch_count} batches, {total_rows_processed} rows so far")
-                    log_memory_usage()
-
-            # Combine all batches
-            X_train = np.vstack(all_X)
-            y_train = np.concatenate(all_y)
-
-            logger.info(f"Training model with {len(X_train)} rows and {X_train.shape[1]} features")
-
-            # Use parallel backend if supported
-            if hasattr(model, 'n_jobs'):
-                with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
-                    model.fit(X_train, y_train)
-            else:
+        # Use parallel backend if supported
+        if hasattr(model, 'n_jobs'):
+            with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
                 model.fit(X_train, y_train)
-
         else:
-            # For models with partial_fit, train incrementally
-            logger.info("Using partial_fit for incremental training")
-
-            # Get list of classes for supervised classification
-            classes = None
-            if hasattr(model, 'classes_'):
-                classes = model.classes_
-
-            for X_batch, y_batch in batch_processor.batch_iterator(max_rows):
-                batch_count += 1
-                batch_size = len(X_batch)
-
-                # Train on this batch
-                if classes is not None and batch_count == 1:
-                    # For first batch, we need to provide classes
-                    model.partial_fit(X_batch, y_batch, classes=np.unique(y_batch))
-                else:
-                    model.partial_fit(X_batch, y_batch)
-
-                total_rows_processed += batch_size
-
-                if batch_count % 5 == 0:
-                    logger.info(f"Processed {batch_count} batches, {total_rows_processed} rows so far")
-                    log_memory_usage()
+            model.fit(X_train, y_train)
 
     training_time = time.time() - start_time
     logger.info(f"Training completed in {training_time:.2f} seconds")
     logger.info(f"Processed {total_rows_processed} rows in {batch_count} batches")
-    log_memory_usage()
 
     return model
-
 
 def evaluate_model_in_batches(model, batch_processor, max_rows=None):
     """Evaluate a model using batches of data"""

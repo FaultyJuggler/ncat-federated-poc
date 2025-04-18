@@ -54,10 +54,37 @@ def initialize_global_model():
 
     # Get optimized model configuration
     model_config = optimize_model_params(platform_config)
-    model_type = model_config['model_type']
 
-    # Create appropriate model type
-    if model_type == 'xgboost':
+    # Set the default model type to SGD
+    model_type = 'sgd'  # Default to SGD classifier
+
+    # Create a helper function for SGD initialization
+    def create_sgd_model(config=None):
+        from sklearn.linear_model import SGDClassifier
+
+        # Default SGD parameters if not provided
+        sgd_params = {
+            'loss': 'log_loss',  # Log loss for probability outputs
+            'alpha': 0.0001,  # Regularization strength
+            'max_iter': 1000,  # Increased from 5 to ensure convergence
+            'tol': 1e-3,  # Convergence tolerance
+            'random_state': 42,  # For reproducibility
+            'warm_start': True,  # Allow incremental training
+            'early_stopping': True,  # Enable early stopping
+            'validation_fraction': 0.1,  # Use 10% of data for early stopping
+            'n_iter_no_change': 5,  # Number of iterations with no improvement
+            'learning_rate': 'optimal'  # Automatically adjusts based on regularization
+        }
+
+        # Override with any provided config
+        if config and 'sgd_params' in config:
+            sgd_params.update(config['sgd_params'])
+
+        logger.info(f"Initializing SGDClassifier with parameters: {sgd_params}")
+        return SGDClassifier(**sgd_params)
+
+    # Check if the model type in config is explicitly xgboost
+    if model_config.get('model_type') == 'xgboost':
         try:
             import xgboost as xgb
             # Add default num_class parameter
@@ -65,19 +92,34 @@ def initialize_global_model():
             if 'num_class' not in params:
                 params['num_class'] = 2  # Default to binary classification
             global_model = xgb.XGBClassifier(**params)
+            model_type = 'xgboost'
             logger.info("Initialized XGBoost model with GPU acceleration")
+
+            # Also log a warning that SGD is preferred
+            logger.warning("Note: SGDClassifier is recommended for federated learning scenarios")
         except ImportError:
-            from sklearn.linear_model import SGDClassifier
-            global_model = SGDClassifier(loss='log_loss', alpha=0.0001, max_iter=5,
-                                        tol=0.001, random_state=42, warm_start=True)
-            model_type = 'sgd'
-            logger.info("Falling back to SGDClassifier model")
+            global_model = create_sgd_model(model_config)
+            logger.info("XGBoost not available. Falling back to SGDClassifier model")
+
+    # Check if the model type in config is explicitly randomforest
+    elif model_config.get('model_type') == 'randomforest':
+        try:
+            from sklearn.ensemble import RandomForestClassifier
+            global_model = RandomForestClassifier(**model_config['params'])
+            model_type = 'randomforest'
+            logger.info("Initialized RandomForest model")
+
+            # Also log a warning that SGD is preferred
+            logger.warning("Note: SGDClassifier is recommended for federated learning scenarios")
+        except Exception:
+            global_model = create_sgd_model(model_config)
+            logger.info("RandomForest initialization failed. Falling back to SGDClassifier model")
+
+    # Default to SGD model (preferred)
     else:
-        from sklearn.linear_model import SGDClassifier
-        global_model = SGDClassifier(loss='log_loss', alpha=0.0001, max_iter=5,
-                                    tol=0.001, random_state=42, warm_start=True)
-        model_type = 'sgd'
-        logger.info("Initialized SGDClassifier model")
+        global_model = create_sgd_model(model_config)
+        logger.info("Initialized SGDClassifier model (preferred for federated learning)")
+
 
 
 def serialize_model(model):
@@ -467,33 +509,78 @@ def merge_models(models, sample_counts):
         logger.warning("Inconsistent model types detected. Converting to same type.")
 
     # Get model type from first model
-    if hasattr(models[0], 'tree_method') and getattr(models[0], 'tree_method', '') == 'gpu_hist':
-        logger.info("Merging XGBoost models")
+    model_type = 'sgd'  # Default to SGD
+
+    # Check if the model is SGDClassifier (recommended approach)
+    if hasattr(models[0], '_finalize_coef'):  # SGDClassifier has this internal method
+        logger.info("Merging SGD Classifier models")
+        model_type = 'sgd'
+    # Fallback checks for other model types
+    elif hasattr(models[0], 'tree_method') and getattr(models[0], 'tree_method', '') == 'gpu_hist':
+        logger.warning("XGBoost model detected, but SGD is recommended")
         model_type = 'xgboost'
-    else:
-        logger.info("Merging RandomForest models")
+    elif hasattr(models[0], 'estimators_'):
+        logger.warning("RandomForest model detected, but SGD is recommended")
         model_type = 'randomforest'
 
     # Create a new global model with optimized parameters for current platform
     model_config = optimize_model_params(platform_config)
 
-    if model_type == 'xgboost':
+    # Override model_type to ensure SGD is used
+    model_config['model_type'] = 'sgd'
+
+    if model_type == 'sgd':
+        # For SGDClassifier
+        from sklearn.linear_model import SGDClassifier
+        global_model = SGDClassifier(**model_config['params'])
+
+        # Merge SGD models by averaging coefficients and intercepts
+        if models and all(hasattr(m, 'coef_') for m in models):
+            # Calculate weights based on sample counts
+            total_samples = sum(sample_counts)
+            weights = [count / total_samples for count in sample_counts]
+
+            # Get first model's shapes to initialize
+            reference_model = models[0]
+            merged_coef = np.zeros_like(reference_model.coef_)
+            merged_intercept = np.zeros_like(reference_model.intercept_)
+
+            # Weighted average of coefficients and intercepts
+            for model, weight in zip(models, weights):
+                merged_coef += model.coef_ * weight
+                merged_intercept += model.intercept_ * weight
+
+            # Set the averaged parameters to the global model
+            global_model.coef_ = merged_coef
+            global_model.intercept_ = merged_intercept
+
+            # Copy other necessary attributes from reference model
+            global_model.classes_ = reference_model.classes_
+            global_model.n_features_in_ = reference_model.n_features_in_
+
+            # Set the model as fitted
+            global_model._fitted = True
+        else:
+            logger.warning("Some SGD models don't have coefficients. Using model with most data.")
+            global_model = models[np.argmax(sample_counts)]
+
+    elif model_type == 'xgboost':
+        logger.warning("Using XGBoost model instead of recommended SGD Classifier")
         try:
             import xgboost as xgb
             global_model = xgb.XGBClassifier(**model_config['params'])
-
-            # For XGBoost, we need to train a new model on weighted predictions
-            # This is a simplified approach - a production system would be more sophisticated
-            # Here we're just doing a weighted average of the models
-            return models[np.argmax(sample_counts)]  # Return the model from client with most data
-
+            # Return the model from client with most data as a simple fallback
+            return models[np.argmax(sample_counts)]
         except ImportError:
-            logger.warning("XGBoost not available for merging. Falling back to RandomForest.")
-            from sklearn.ensemble import RandomForestClassifier
-            model_config = {'model_type': 'randomforest', 'params': optimize_rf_params(platform_config)}
-            global_model = RandomForestClassifier(**model_config['params'])
+            logger.warning("XGBoost not available. Falling back to SGD Classifier.")
+            from sklearn.linear_model import SGDClassifier
+            model_config['params'] = {'loss': 'log_loss', 'max_iter': 1000, 'tol': 1e-3}
+            global_model = SGDClassifier(**model_config['params'])
+            # Return first model as fallback
+            return models[0]
     else:
-        # For RandomForest, we'll merge trees as before
+        # For RandomForest (fallback case)
+        logger.warning("Using RandomForest model instead of recommended SGD Classifier")
         from sklearn.ensemble import RandomForestClassifier
         global_model = RandomForestClassifier(**model_config['params'])
 
@@ -559,8 +646,16 @@ def federated_averaging():
                     sample_counts.append(model_info['sample_count'])
 
                     # Update model type based on received model
-                    if hasattr(client_model, 'tree_method') and getattr(client_model, 'tree_method', '') == 'gpu_hist':
+                    if hasattr(client_model, '_finalize_coef'):  # Check for SGD Classifier
+                        model_type = 'sgd'
+                    elif hasattr(client_model, 'tree_method') and getattr(client_model, 'tree_method',
+                                                                          '') == 'gpu_hist':
                         model_type = 'xgboost'
+                    elif hasattr(client_model, 'estimators_'):
+                        model_type = 'randomforest'
+                    else:
+                        # Default to SGD as our preferred model type
+                        model_type = 'sgd'
                 else:
                     logger.warning(f"Model file for {client_id} not found")
             except Exception as e:
@@ -572,6 +667,14 @@ def federated_averaging():
 
         # Merge models using weighted voting
         try:
+            # If mixed model types are received, log warning
+            if len(set(model_type for model in models
+                       if hasattr(model, '_finalize_coef') or
+                          hasattr(model, 'tree_method') or
+                          hasattr(model, 'estimators_'))) > 1:
+                logger.warning("Mixed model types detected. Using SGD model type as default.")
+                model_type = 'sgd'  # Force SGD as our default
+
             global_model = merge_models(models, sample_counts)
 
             # Save the global model
@@ -608,6 +711,7 @@ def federated_averaging():
             is_training_complete = True
             # Save the final model
             joblib.dump(global_model, "final_model.joblib")
+
 
 
 # API endpoints
