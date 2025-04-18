@@ -318,8 +318,6 @@ def train_model_in_batches(model, batch_processor, max_rows=None):
 
     log_memory_usage()
 
-    logger.info(
-        f"Memory usage: {memory_usage_percent():.1f}% ({memory_used_mb():.1f}MB used out of {memory_total_mb():.1f}MB)")
     logger.info("Using partial_fit for incremental training")
 
     total_rows_processed = 0
