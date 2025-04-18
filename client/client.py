@@ -339,14 +339,14 @@ def train_model_in_batches(model, batch_processor, max_rows=None):
                 batch_size = rows_to_take
 
             # On first batch, pass the classes parameter
-            if first_batch:
+            if batch_count == 0:
                 model.partial_fit(X_batch, y_batch, classes=all_classes)
-                first_batch = False
                 logger.info(f"First batch processed with classes: {all_classes}")
             else:
                 model.partial_fit(X_batch, y_batch)
 
             total_rows_processed += batch_size
+            batch_count += 1
             logger.info(f"Processed batch: {batch_size} samples, total: {total_rows_processed}")
 
             if max_rows and total_rows_processed >= max_rows:
