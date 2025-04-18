@@ -318,78 +318,52 @@ def train_model_in_batches(model, batch_processor, max_rows=None):
 
     log_memory_usage()
 
+    logger.info(
+        f"Memory usage: {memory_usage_percent():.1f}% ({memory_used_mb():.1f}MB used out of {memory_total_mb():.1f}MB)")
+    logger.info("Using partial_fit for incremental training")
+
     total_rows_processed = 0
     batch_count = 0
     start_time = time.time()
 
-    # Check if the model is SGD or has partial_fit
-    has_partial_fit = hasattr(model, 'partial_fit') and USE_PARTIAL_FIT
+    # Define classes for binary classification (goodware=0, malware=1)
+    all_classes = np.array([0, 1])
 
-    # For most models (including SGD), process in batches
-    if has_partial_fit:
-        # For models with partial_fit, train incrementally
-        logger.info("Using partial_fit for incremental training")
+    try:
+        for X_batch, y_batch in batch_processor.batch_iterator():
+            batch_size = X_batch.shape[0]
 
-        # Get all unique classes from the dataset (implementation depends on your data structure)
-        all_classes = np.unique(batch_processor.get_unique_classes())
-        logger.info(f"Found {len(all_classes)} unique classes: {all_classes}")
-
-        # Get list of classes for supervised classification
-        classes = None
-        if hasattr(model, 'classes_'):
-            classes = model.classes_
-
-        for X_batch, y_batch in batch_processor.batch_iterator(max_rows):
-            batch_size = len(X_batch)
+            if max_rows and total_rows_processed + batch_size > max_rows:
+                # Trim the batch to respect max_rows
+                rows_to_take = max_rows - total_rows_processed
+                X_batch = X_batch[:rows_to_take]
+                y_batch = y_batch[:rows_to_take]
+                batch_size = rows_to_take
 
             # On first batch, pass the classes parameter
             if batch_count == 0:
                 model.partial_fit(X_batch, y_batch, classes=all_classes)
+                logger.info(f"First batch processed with classes: {all_classes}")
             else:
                 model.partial_fit(X_batch, y_batch)
 
-            batch_count += 1
+            total_rows_processed += batch_size
+            logger.info(f"Processed batch: {batch_size} samples, total: {total_rows_processed}")
 
-        total_rows_processed += batch_size
-        logger.info(f"Processed batch: {batch_size} samples, total: {total_rows_processed}")
+            if max_rows and total_rows_processed >= max_rows:
+                logger.info(f"Reached max_rows limit ({max_rows}), stopping training")
+                break
 
-        if batch_count % 5 == 0:
-                logger.info(f"Processed {batch_count} batches, {total_rows_processed} rows so far")
-                log_memory_usage()
-    else:
-        # If model doesn't support partial_fit, collect all data for standard fit
-        logger.info("Model doesn't support partial_fit, collecting all data for fit")
-        all_X = []
-        all_y = []
+        logger.info(f"Completed batch training, processed {total_rows_processed} samples")
+        training_time = time.time() - start_time
+        logger.info(f"Training completed in {training_time:.2f} seconds")
+        logger.info(f"Processed {total_rows_processed} rows in {batch_count} batches")
 
-        for X_batch, y_batch in batch_processor.batch_iterator(max_rows):
-            all_X.append(X_batch)
-            all_y.append(y_batch)
-            batch_count += 1
-            total_rows_processed += len(X_batch)
-
-            if batch_count % 10 == 0:
-                logger.info(f"Loaded {batch_count} batches, {total_rows_processed} rows so far")
-                log_memory_usage()
-
-        # Combine all batches
-        X_train = np.vstack(all_X)
-        y_train = np.concatenate(all_y)
-
-        logger.info(f"Training model with {len(X_train)} rows and {X_train.shape[1]} features")
-
-        # Use parallel backend if supported
-        if hasattr(model, 'n_jobs'):
-            with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
-                model.fit(X_train, y_train)
-        else:
-            model.fit(X_train, y_train)
-
-    training_time = time.time() - start_time
-    logger.info(f"Training completed in {training_time:.2f} seconds")
-    logger.info(f"Processed {total_rows_processed} rows in {batch_count} batches")
-
-    return model
+        return model
+    except Exception as e:
+        logger.error(f"Error training model: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
 def evaluate_model_in_batches(model, batch_processor, max_rows=None):
     """Evaluate a model using batches of data"""
