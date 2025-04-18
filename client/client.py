@@ -647,6 +647,14 @@ def upload_model(model, sample_count, metrics):
         "use_gpu": platform_config['use_gpu']
     }
 
+    # Debug output to see what we're sending
+    logger.info(f"Serialized metadata: {type(metadata)}")
+
+    # Open the model file for upload
+    files = {
+        'model_file': open(model_path, 'rb')
+    }
+
     for retry in range(MAX_RETRIES):
         try:
             # Send model file and metadata to server
@@ -655,9 +663,7 @@ def upload_model(model, sample_count, metrics):
                 response = requests.post(
                     f"{CENTRAL_SERVER}/upload",
                     files=files,
-                    data={'json': json.dumps(metadata)},
-                    json=metadata,
-                    headers={'Content-Type': 'application/json'}
+                    data={'json': json.dumps(metadata)}
                 )
 
             if response.status_code == 200:
