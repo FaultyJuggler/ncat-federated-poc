@@ -34,7 +34,6 @@ services:
       - DATA_SOURCE=parquet
       - PARQUET_FILE=/data/dataset.parquet
       - TARGET_COLUMN=label
-      - NVIDIA_VISIBLE_DEVICES=1
       - CUDA_VISIBLE_DEVICES=0
       - BATCH_SIZE=2000
       - MAX_ROWS=50000
@@ -74,7 +73,6 @@ services:
       - DATA_SOURCE=parquet
       - PARQUET_FILE=/data/dataset.parquet
       - TARGET_COLUMN=label
-      - NVIDIA_VISIBLE_DEVICES=2
       - CUDA_VISIBLE_DEVICES=0
       - BATCH_SIZE=2000
       - MAX_ROWS=50000
@@ -113,7 +111,6 @@ services:
       - DATA_SOURCE=parquet
       - PARQUET_FILE=/data/dataset.parquet
       - TARGET_COLUMN=label
-      - NVIDIA_VISIBLE_DEVICES=3
       - CUDA_VISIBLE_DEVICES=0
       - BATCH_SIZE=2000
       - MAX_ROWS=50000

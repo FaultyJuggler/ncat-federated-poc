@@ -1,4 +1,5 @@
-FROM rapidsai/rapidsai:cuda11.8-runtime-ubuntu22.04-py3.10
+#FROM rapidsai/rapidsai:cuda11.8-runtime-ubuntu22.04-py3.10
+FROM nvcr.io/nvidia/pytorch:23.12-py3
 
 # Rest of your Dockerfile
 
