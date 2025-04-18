@@ -139,12 +139,11 @@ def optimize_model_params(config):
         'model_type': 'sgd',
         'params': {
             'loss': 'log_loss',
-            'alpha': 0.0001,
-            'max_iter': 5,
-            'tol': 1e-3,
-            'random_state': 42,
-            'warm_start': True,  # Important for incremental learning
-            'n_jobs': config.get('n_jobs', 1)
+            'alpha': 0.01,  # Higher regularization
+            'max_iter': 1,  # Just 1 pass over the data
+            'tol': 1e-2,  # Less strict convergence
+            'warm_start': True,
+            'n_jobs': 1  # Force single-threaded
         }
     }
 

@@ -8,6 +8,7 @@ import joblib
 import pandas as pd
 import sys
 import traceback
+import gc
 
 # Add paths for imports
 sys.path.append('/')  # Add root directory to path for Docker container
@@ -64,7 +65,7 @@ def log_memory_usage():
 
 
 class BatchProcessor:
-    """Class to handle batch processing of Parquet files"""
+    """Class to handle batch processing of Parquet files with improved memory management"""
 
     def __init__(self, file_path, target_column, batch_size=10000):
         """Initialize the batch processor"""
@@ -92,7 +93,8 @@ class BatchProcessor:
             logger.info(f"Total rows in Parquet file: {self.total_rows}")
 
             # Read a small sample to determine schema and datatypes
-            sample = parquet_file.read_row_group(0).to_pandas()
+            # Only read first 100 rows for schema detection
+            sample = next(self._read_parquet_chunks(parquet_file, max_chunks=1, rows_per_chunk=100))
 
             # Make sure target column exists
             if self.target_column not in sample.columns:
@@ -106,16 +108,17 @@ class BatchProcessor:
             logger.info(
                 f"Identified {len(self.feature_cols)} feature columns and {len(self.categorical_cols)} categorical columns")
 
-            # Handle a small sample to determine one-hot encoding columns
+            # Extract basic information but don't do full one-hot encoding
+            self.num_features = len(self.feature_cols)
             if self.categorical_cols:
-                # Convert categorical to one-hot
-                sample_x = pd.get_dummies(sample[self.feature_cols], columns=self.categorical_cols, drop_first=True)
-                self.num_features = sample_x.shape[1]
-                logger.info(f"After one-hot encoding: {self.num_features} features")
-            else:
-                self.num_features = len(self.feature_cols)
+                logger.info("Using simple label encoding for categorical features to save memory")
 
             self.has_initialized = True
+
+            # Force cleanup
+            del sample
+            del parquet_file
+            gc.collect()
 
         except Exception as e:
             logger.error(f"Error initializing batch processor: {str(e)}")
@@ -129,80 +132,178 @@ class BatchProcessor:
         return self.total_rows
 
     def get_num_features(self):
-        """Return the number of features after one-hot encoding"""
+        """Return the number of features after encoding"""
         if not self.has_initialized:
             self.initialize()
         return self.num_features
 
+    def _read_parquet_chunks(self, parquet_file=None, max_chunks=None, rows_per_chunk=None):
+        """Generator to read chunks of a parquet file with controlled memory usage"""
+        if parquet_file is None:
+            import pyarrow.parquet as pq
+            parquet_file = pq.ParquetFile(self.file_path)
+
+        num_row_groups = parquet_file.metadata.num_row_groups
+        chunks_read = 0
+
+        for row_group_idx in range(num_row_groups):
+            if max_chunks is not None and chunks_read >= max_chunks:
+                break
+
+            try:
+                # Read a row group
+                table = parquet_file.read_row_group(row_group_idx)
+                df = table.to_pandas()
+
+                if rows_per_chunk is not None and rows_per_chunk < len(df):
+                    # Split into smaller chunks if needed
+                    for i in range(0, len(df), rows_per_chunk):
+                        chunks_read += 1
+                        if max_chunks is not None and chunks_read > max_chunks:
+                            break
+
+                        chunk = df.iloc[i:i + rows_per_chunk].copy()
+                        yield chunk
+
+                        # Force cleanup of the chunk
+                        del chunk
+                        gc.collect()
+                else:
+                    chunks_read += 1
+                    yield df
+
+                # Force cleanup of the dataframe and table
+                del df
+                del table
+                gc.collect()
+
+            except Exception as e:
+                logger.error(f"Error reading row group {row_group_idx}: {str(e)}")
+                continue
+
     def batch_iterator(self, max_rows=None):
-        """Generator to yield batches of data from the Parquet file"""
+        """Generator to yield batches of data from the Parquet file with optimized memory usage"""
         if not self.has_initialized:
             self.initialize()
 
         import pyarrow.parquet as pq
-        parquet_file = pq.ParquetFile(self.file_path)
 
         # Determine how many rows to read
         rows_to_read = min(self.total_rows, max_rows) if max_rows else self.total_rows
         logger.info(f"Will read up to {rows_to_read} rows in batches of {self.batch_size}")
 
         rows_read = 0
-        row_group_index = 0
-        df_remainder = None
 
-        while rows_read < rows_to_read and row_group_index < parquet_file.metadata.num_row_groups:
-            # Read a row group
-            try:
-                df = parquet_file.read_row_group(row_group_index).to_pandas()
-                row_group_index += 1
+        # Use chunk reader instead of loading row groups directly
+        for chunk_df in self._read_parquet_chunks(rows_per_chunk=min(50000, self.batch_size * 5)):
+            if rows_read >= rows_to_read:
+                break
 
-                # Append any remaining rows from previous batch
-                if df_remainder is not None and len(df_remainder) > 0:
-                    df = pd.concat([df_remainder, df], ignore_index=True)
-                    df_remainder = None
+            # Process in batch_size chunks
+            for start_idx in range(0, len(chunk_df), self.batch_size):
+                if rows_read >= rows_to_read:
+                    break
 
-                # Process in batch_size chunks
-                start_idx = 0
-                while start_idx < len(df) and rows_read < rows_to_read:
-                    end_idx = min(start_idx + self.batch_size, len(df))
-                    batch_df = df.iloc[start_idx:end_idx]
+                end_idx = min(start_idx + self.batch_size, len(chunk_df))
+                batch_df = chunk_df.iloc[start_idx:end_idx].copy()
 
-                    # Process features and target
-                    X_batch = batch_df[self.feature_cols]
-                    y_batch = batch_df[self.target_column]
+                # Process features and target
+                X_batch = batch_df[self.feature_cols].copy()
+                y_batch = batch_df[self.target_column].copy()
 
-                    # Handle categorical variables
-                    if self.categorical_cols:
-                        # X_batch = pd.get_dummies(X_batch, columns=self.categorical_cols, drop_first=True)
-                        for col in self.categorical_cols:
-                            # Convert to numeric using label encoding instead of one-hot
+                # Release batch_df memory
+                del batch_df
+
+                # Handle categorical variables with simple label encoding
+                if self.categorical_cols:
+                    for col in self.categorical_cols:
+                        # Check if column exists (defensive coding)
+                        if col in X_batch.columns:
+                            # Simple label encoding uses less memory than one-hot
                             X_batch[col] = pd.factorize(X_batch[col])[0]
 
-                    # Convert to numpy arrays
-                    X_batch = X_batch.to_numpy().astype('float32')
-                    y_batch = y_batch.to_numpy()
+                # Convert to numpy arrays
+                X_batch_np = X_batch.to_numpy().astype('float32')
+                y_batch_np = y_batch.to_numpy()
 
-                    batch_rows = len(X_batch)
-                    rows_read += batch_rows
+                # Release pandas memory
+                del X_batch
+                del y_batch
 
-                    yield X_batch, y_batch
+                rows_read += len(X_batch_np)
 
-                    start_idx += self.batch_size
+                # Force garbage collection before yielding
+                gc.collect()
 
-                # If there's a remainder from this chunk, save it for the next iteration
-                if start_idx < len(df):
-                    df_remainder = df.iloc[start_idx:]
+                yield X_batch_np, y_batch_np
 
-                # Clean up to save memory
-                del df
+                # Force garbage collection after processing
+                gc.collect()
 
-            except Exception as e:
-                logger.error(f"Error processing row group {row_group_index - 1}: {str(e)}")
-                logger.error(traceback.format_exc())
-                row_group_index += 1  # Skip to next row group on error
+            # Explicitly delete chunk_df after processing
+            del chunk_df
+            gc.collect()
 
-        logger.info(f"Completed reading {rows_read} rows from Parquet file")
+            # Log progress
+            logger.info(f"Processed {rows_read}/{rows_to_read} rows")
 
+
+def batch_iterator_memory_safe(self, max_rows=None):
+    """Ultra memory-safe batch iterator that skips categorical encoding completely"""
+    if not self.has_initialized:
+        self.initialize()
+
+    import pyarrow.parquet as pq
+    parquet_file = pq.ParquetFile(self.file_path)
+
+    # Determine how many rows to read
+    rows_to_read = min(self.total_rows, max_rows) if max_rows else self.total_rows
+    logger.info(f"Memory-safe mode: Will read up to {rows_to_read} rows in batches of {self.batch_size}")
+
+    rows_read = 0
+    row_group_index = 0
+
+    while rows_read < rows_to_read and row_group_index < parquet_file.metadata.num_row_groups:
+        try:
+            df = parquet_file.read_row_group(row_group_index).to_pandas()
+            row_group_index += 1
+
+            # Process in batch_size chunks
+            start_idx = 0
+            while start_idx < len(df) and rows_read < rows_to_read:
+                end_idx = min(start_idx + self.batch_size, len(df))
+                batch_df = df.iloc[start_idx:end_idx]
+
+                # ULTRA SAFE: Skip all categorical processing
+                # Just use numerical columns and convert categoricals to simple integers
+                X_batch = batch_df.drop(columns=[self.target_column])
+                y_batch = batch_df[self.target_column]
+
+                for col in X_batch.select_dtypes(include=['object', 'category']).columns:
+                    # Simple label encoding
+                    X_batch[col] = pd.factorize(X_batch[col])[0]
+
+                # Convert to numpy arrays
+                X_batch = X_batch.to_numpy().astype('float32')
+                y_batch = y_batch.to_numpy()
+
+                batch_rows = len(X_batch)
+                rows_read += batch_rows
+
+                # Force garbage collection
+                gc.collect()
+
+                yield X_batch, y_batch
+
+                start_idx += self.batch_size
+
+            # Clean up to save memory
+            del df
+            gc.collect()
+
+        except Exception as e:
+            logger.error(f"Error processing row group {row_group_index - 1}: {str(e)}")
+            row_group_index += 1  # Skip to next row group on error
 
 def train_model_in_batches(model, batch_processor, max_rows=None):
     """Train a model using batches of data"""

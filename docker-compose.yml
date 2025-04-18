@@ -33,7 +33,8 @@ services:
       - PARQUET_FILE=/data/dataset.parquet
       - TARGET_COLUMN=label
       - NVIDIA_VISIBLE_DEVICES=all
-      - BATCH_SIZE=5000
+      - BATCH_SIZE=500
+      - MAX_ROWS=50000
       - USE_PARTIAL_FIT=true
     volumes:
       - ./client:/app
@@ -62,7 +63,8 @@ services:
       - PARQUET_FILE=/data/dataset.parquet
       - TARGET_COLUMN=label
       - NVIDIA_VISIBLE_DEVICES=all
-      - BATCH_SIZE=5000
+      - BATCH_SIZE=500
+      - MAX_ROWS=50000
       - USE_PARTIAL_FIT=true
     volumes:
       - ./client:/app
@@ -91,7 +93,8 @@ services:
       - PARQUET_FILE=/data/dataset.parquet
       - TARGET_COLUMN=label
       - NVIDIA_VISIBLE_DEVICES=all
-      - BATCH_SIZE=5000
+      - BATCH_SIZE=500
+      - MAX_ROWS=50000
       - USE_PARTIAL_FIT=true
     volumes:
       - ./client:/app
