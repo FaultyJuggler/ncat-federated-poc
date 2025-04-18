@@ -60,7 +60,6 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              device_ids: ['1']
               capabilities: [gpu]
 
   client2:
@@ -97,7 +96,6 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              device_ids: ['2']
               capabilities: [gpu]
 
   client3:
@@ -134,7 +132,6 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              device_ids: ['3']
               capabilities: [gpu]
 
 networks:
