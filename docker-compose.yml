@@ -20,9 +20,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    # GPU access with privileged mode
+    runtime: nvidia
+    privileged: true
     environment:
-      - NVIDIA_VISIBLE_DEVICES=0
-      - USE_GPU=true
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
 
   client1:
     build:
@@ -40,7 +43,6 @@ services:
       - BATCH_SIZE=2000
       - MAX_ROWS=50000
       - USE_PARTIAL_FIT=true
-      - USE_GPU=true
     volumes:
       - ./client:/app
       - ./data/client1:/data
@@ -59,6 +61,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    # GPU access configuration
+    runtime: nvidia
+    privileged: true
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
 
   client2:
     build:
@@ -76,7 +84,6 @@ services:
       - BATCH_SIZE=2000
       - MAX_ROWS=50000
       - USE_PARTIAL_FIT=true
-      - USE_GPU=true
     volumes:
       - ./client:/app
       - ./data/client2:/data
@@ -95,6 +102,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    # GPU access configuration
+    runtime: nvidia
+    privileged: true
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
 
   client3:
     build:
@@ -112,7 +125,6 @@ services:
       - BATCH_SIZE=2000
       - MAX_ROWS=50000
       - USE_PARTIAL_FIT=true
-      - USE_GPU=true
     volumes:
       - ./client:/app
       - ./data/client3:/data
@@ -131,6 +143,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    # GPU access configuration
+    runtime: nvidia
+    privileged: true
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
 
 networks:
   fl_network:
