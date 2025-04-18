@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/rapids:23.12-cuda11.8-runtime-ubuntu22.04-py3.10
+FROM rapidsai/rapidsai:cuda11.8-runtime-ubuntu22.04-py3.10
 
 # Rest of your Dockerfile
 
