@@ -133,17 +133,20 @@ def detect_platform():
 
 # SGD classifier
 def optimize_model_params(config):
+    """Return optimized model parameters based on the platform configuration."""
+    # Use SGDClassifier instead of XGBoost
     from sklearn.linear_model import SGDClassifier
-
+    logger.info("Using memory-efficient SGDClassifier for federated learning")
     return {
         'model_type': 'sgd',
         'params': {
-            'loss': 'log_loss',
-            'alpha': 0.01,  # Higher regularization
-            'max_iter': 1,  # Just 1 pass over the data
-            'tol': 1e-2,  # Less strict convergence
-            'warm_start': True,
-            'n_jobs': 1  # Force single-threaded
+            'loss': 'log_loss',  # For classification
+            'penalty': 'l2',
+            'alpha': 0.0001,
+            'max_iter': 5,
+            'tol': 0.001,
+            'random_state': 42,
+            'warm_start': True  # Important for incremental learning
         }
     }
 

@@ -52,25 +52,18 @@ logger.info(f"Running on detected platform: {platform_config['platform']}")
 def initialize_global_model():
     global global_model, model_type
 
-    # Get optimized model configuration
-    model_config = optimize_model_params(platform_config)
-    model_type = model_config['model_type']
-
-    # Create appropriate model type
-    if model_type == 'xgboost':
-        try:
-            import xgboost as xgb
-            global_model = xgb.XGBClassifier(**model_config['params'])
-            logger.info("Initialized XGBoost model with GPU acceleration")
-        except ImportError:
-            from sklearn.ensemble import RandomForestClassifier
-            global_model = RandomForestClassifier(**model_config['params'])
-            model_type = 'randomforest'
-            logger.info("Falling back to RandomForest model")
-    else:
-        from sklearn.ensemble import RandomForestClassifier
-        global_model = RandomForestClassifier(**model_config['params'])
-        logger.info("Initialized RandomForest model")
+    # Force SGDClassifier regardless of what platform_utils recommends
+    from sklearn.linear_model import SGDClassifier
+    global_model = SGDClassifier(
+        loss='log_loss',
+        alpha=0.0001,
+        max_iter=5,
+        tol=0.001,
+        random_state=42,
+        warm_start=True
+    )
+    model_type = 'sgd'
+    logger.info("Initialized SGDClassifier model for memory efficiency")
 
 
 def serialize_model(model):
