@@ -112,7 +112,6 @@ def serialize_model(model):
     serialized = {}
     serialized['model_type'] = model_type
 
-
     if model_type == 'sgd':
         # For SGD Classifier
         serialized['n_classes'] = model.classes_.shape[0] if hasattr(model, 'classes_') else 2

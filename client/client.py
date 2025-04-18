@@ -305,9 +305,17 @@ def batch_iterator_memory_safe(self, max_rows=None):
             logger.error(f"Error processing row group {row_group_index - 1}: {str(e)}")
             row_group_index += 1  # Skip to next row group on error
 
+def get_unique_classes(self):
+    """Return all unique classes in the dataset"""
+    # Implementation depends on your data structure
+    unique_classes = pd.read_parquet(self.file_path, columns=[self.target_column])[self.target_column].unique()
+    return unique_classes
+
+
 def train_model_in_batches(model, batch_processor, max_rows=None):
-    """Train a model using batches of data"""
-    logger.info("Starting batch training...")
+    """Train model using batches of data to manage memory usage"""
+    logger.info(f"Starting batch training with max_rows={max_rows}")
+
     log_memory_usage()
 
     total_rows_processed = 0
@@ -322,25 +330,30 @@ def train_model_in_batches(model, batch_processor, max_rows=None):
         # For models with partial_fit, train incrementally
         logger.info("Using partial_fit for incremental training")
 
+        # Get all unique classes from the dataset (implementation depends on your data structure)
+        all_classes = np.unique(batch_processor.get_unique_classes())
+        logger.info(f"Found {len(all_classes)} unique classes: {all_classes}")
+
         # Get list of classes for supervised classification
         classes = None
         if hasattr(model, 'classes_'):
             classes = model.classes_
 
         for X_batch, y_batch in batch_processor.batch_iterator(max_rows):
-            batch_count += 1
             batch_size = len(X_batch)
 
-            # Train on this batch
-            if classes is not None and batch_count == 1:
-                # For first batch, we need to provide classes
-                model.partial_fit(X_batch, y_batch, classes=np.unique(y_batch))
+            # On first batch, pass the classes parameter
+            if batch_count == 0:
+                model.partial_fit(X_batch, y_batch, classes=all_classes)
             else:
                 model.partial_fit(X_batch, y_batch)
 
-            total_rows_processed += batch_size
+            batch_count += 1
 
-            if batch_count % 5 == 0:
+        total_rows_processed += batch_size
+        logger.info(f"Processed batch: {batch_size} samples, total: {total_rows_processed}")
+
+        if batch_count % 5 == 0:
                 logger.info(f"Processed {batch_count} batches, {total_rows_processed} rows so far")
                 log_memory_usage()
     else:
