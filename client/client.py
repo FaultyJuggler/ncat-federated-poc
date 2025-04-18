@@ -395,14 +395,8 @@ def evaluate_model_in_batches(model, batch_processor, max_rows=None):
         batch_count += 1
         batch_size = len(X_batch)
 
-        # Make predictions on this batch
-        if hasattr(model, 'tree_method') and getattr(model, 'tree_method', '') == 'gpu_hist':
-            # XGBoost with GPU
+        with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
             y_pred = model.predict(X_batch)
-        else:
-            # Standard model
-            with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
-                y_pred = model.predict(X_batch)
 
         # Collect true and predicted values for final metrics
         y_true_all.extend(y_batch)
@@ -504,15 +498,6 @@ def create_model():
         from sklearn.linear_model import SGDClassifier
         logger.info("Creating SGDClassifier model")
         return SGDClassifier(**model_config['params'])
-    elif model_config['model_type'] == 'xgboost':
-        try:
-            import xgboost as xgb
-            logger.info(f"Creating XGBoost model with GPU acceleration")
-            return xgb.XGBClassifier(**model_config['params'])
-        except ImportError:
-            logger.warning("XGBoost not available, falling back to RandomForest")
-            from sklearn.ensemble import RandomForestClassifier
-            return RandomForestClassifier(**model_config['params'])
     else:
         # Default to RandomForest
         from sklearn.ensemble import RandomForestClassifier
@@ -641,12 +626,6 @@ def deserialize_model(serialized_params):
     # For backward compatibility, still handle other model types
     elif model_type == 'randomforest':
         logger.warning("RandomForest requested but using SGD instead for consistency")
-        # Fall back to SGD with default params
-        from sklearn.linear_model import SGDClassifier
-        return SGDClassifier(loss='log', penalty='l2', random_state=42)
-
-    elif model_type == 'xgboost':
-        logger.warning("XGBoost requested but using SGD instead for consistency")
         # Fall back to SGD with default params
         from sklearn.linear_model import SGDClassifier
         return SGDClassifier(loss='log', penalty='l2', random_state=42)

@@ -83,26 +83,8 @@ def initialize_global_model():
         logger.info(f"Initializing SGDClassifier with parameters: {sgd_params}")
         return SGDClassifier(**sgd_params)
 
-    # Check if the model type in config is explicitly xgboost
-    if model_config.get('model_type') == 'xgboost':
-        try:
-            import xgboost as xgb
-            # Add default num_class parameter
-            params = model_config['params'].copy()
-            if 'num_class' not in params:
-                params['num_class'] = 2  # Default to binary classification
-            global_model = xgb.XGBClassifier(**params)
-            model_type = 'xgboost'
-            logger.info("Initialized XGBoost model with GPU acceleration")
-
-            # Also log a warning that SGD is preferred
-            logger.warning("Note: SGDClassifier is recommended for federated learning scenarios")
-        except ImportError:
-            global_model = create_sgd_model(model_config)
-            logger.info("XGBoost not available. Falling back to SGDClassifier model")
-
     # Check if the model type in config is explicitly randomforest
-    elif model_config.get('model_type') == 'randomforest':
+    if model_config.get('model_type') == 'randomforest':
         try:
             from sklearn.ensemble import RandomForestClassifier
             global_model = RandomForestClassifier(**model_config['params'])
@@ -126,44 +108,7 @@ def serialize_model(model):
     """Serialize model to a dictionary"""
     serialized = {}
 
-    # Store model type
-    if hasattr(model, 'tree_method') and getattr(model, 'tree_method', '') == 'gpu_hist':
-        serialized['model_type'] = 'xgboost'
-    else:
-        serialized['model_type'] = 'sgd'  # or 'randomforest' depending on your model
-
-    # For XGBoost models
-    if serialized['model_type'] == 'xgboost':
-        try:
-            import xgboost as xgb
-            if isinstance(model, xgb.XGBClassifier):
-                # XGBoost models have different attributes
-                serialized['params'] = model.get_params()
-
-                # XGBoost might not have n_classes_ attribute yet (before fit)
-                if hasattr(model, 'n_classes_'):
-                    serialized['n_classes'] = model.n_classes_
-                else:
-                    # Default to binary classification if not known
-                    serialized['n_classes'] = 2
-
-                if hasattr(model, 'n_features_in_'):
-                    serialized['n_features'] = model.n_features_in_
-                else:
-                    serialized['n_features'] = 0
-
-                if hasattr(model, 'classes_'):
-                    serialized['classes'] = model.classes_.tolist()
-                else:
-                    serialized['classes'] = None
-        except Exception as e:
-            logger.error(f"Error serializing XGBoost model: {str(e)}")
-            # Provide defaults
-            serialized['params'] = {}
-            serialized['n_classes'] = 2
-            serialized['n_features'] = 0
-            serialized['classes'] = None
-    elif serialized['model_type'] == 'sgd':
+    if serialized['model_type'] == 'sgd':
         # For SGD Classifier
         serialized['n_classes'] = model.classes_.shape[0] if hasattr(model, 'classes_') else 2
         serialized['n_features'] = model.n_features_in_ if hasattr(model, 'n_features_in_') else 0
@@ -480,15 +425,6 @@ def deserialize_model(serialized_params):
         except Exception as e:
             logger.error(f"Error creating SGD model: {e}")
             raise
-
-
-    elif model_type == 'xgboost':
-        try:
-            import xgboost as xgb
-            model = xgb.XGBClassifier(**serialized_params['params'])
-        except ImportError:
-            from sklearn.ensemble import RandomForestClassifier
-            model = RandomForestClassifier(**serialized_params['params'])
     else:
         from sklearn.ensemble import RandomForestClassifier
         model = RandomForestClassifier(**serialized_params['params'])
@@ -516,9 +452,6 @@ def merge_models(models, sample_counts):
         logger.info("Merging SGD Classifier models")
         model_type = 'sgd'
     # Fallback checks for other model types
-    elif hasattr(models[0], 'tree_method') and getattr(models[0], 'tree_method', '') == 'gpu_hist':
-        logger.warning("XGBoost model detected, but SGD is recommended")
-        model_type = 'xgboost'
     elif hasattr(models[0], 'estimators_'):
         logger.warning("RandomForest model detected, but SGD is recommended")
         model_type = 'randomforest'
@@ -564,20 +497,6 @@ def merge_models(models, sample_counts):
             logger.warning("Some SGD models don't have coefficients. Using model with most data.")
             global_model = models[np.argmax(sample_counts)]
 
-    elif model_type == 'xgboost':
-        logger.warning("Using XGBoost model instead of recommended SGD Classifier")
-        try:
-            import xgboost as xgb
-            global_model = xgb.XGBClassifier(**model_config['params'])
-            # Return the model from client with most data as a simple fallback
-            return models[np.argmax(sample_counts)]
-        except ImportError:
-            logger.warning("XGBoost not available. Falling back to SGD Classifier.")
-            from sklearn.linear_model import SGDClassifier
-            model_config['params'] = {'loss': 'log_loss', 'max_iter': 1000, 'tol': 1e-3}
-            global_model = SGDClassifier(**model_config['params'])
-            # Return first model as fallback
-            return models[0]
     else:
         # For RandomForest (fallback case)
         logger.warning("Using RandomForest model instead of recommended SGD Classifier")
@@ -648,9 +567,6 @@ def federated_averaging():
                     # Update model type based on received model
                     if hasattr(client_model, '_finalize_coef'):  # Check for SGD Classifier
                         model_type = 'sgd'
-                    elif hasattr(client_model, 'tree_method') and getattr(client_model, 'tree_method',
-                                                                          '') == 'gpu_hist':
-                        model_type = 'xgboost'
                     elif hasattr(client_model, 'estimators_'):
                         model_type = 'randomforest'
                     else:

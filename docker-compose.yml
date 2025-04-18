@@ -60,6 +60,12 @@ services:
               capabilities: [gpu]
     # GPU access configuration
     privileged: true
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    shm_size: 8gb
+
 
 
   client2:
@@ -99,6 +105,11 @@ services:
               capabilities: [gpu]
     # GPU access configuration
     privileged: true
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    shm_size: 8gb
 
   client3:
     build:
@@ -137,6 +148,11 @@ services:
               capabilities: [gpu]
     # GPU access configuration
     privileged: true
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    shm_size: 8gb
 
 networks:
   fl_network:
