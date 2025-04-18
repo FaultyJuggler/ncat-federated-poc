@@ -1,3 +1,9 @@
+# Define common environment variables
+x-common-env: &common-env
+  - MODEL_TYPE=sgd
+
+
+
 services:
   central:
     build:
@@ -65,8 +71,6 @@ services:
       memlock: -1
       stack: 67108864
     shm_size: 8gb
-
-
 
   client2:
     build:

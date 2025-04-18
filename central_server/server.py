@@ -106,9 +106,14 @@ def initialize_global_model():
 
 def serialize_model(model):
     """Serialize model to a dictionary"""
-    serialized = {}
+    # Get model type from environment or default to 'sgd'
+    model_type = os.environ.get('MODEL_TYPE', 'sgd')
 
-    if serialized['model_type'] == 'sgd':
+    serialized = {}
+    serialized['model_type'] = model_type
+
+
+    if model_type == 'sgd':
         # For SGD Classifier
         serialized['n_classes'] = model.classes_.shape[0] if hasattr(model, 'classes_') else 2
         serialized['n_features'] = model.n_features_in_ if hasattr(model, 'n_features_in_') else 0
