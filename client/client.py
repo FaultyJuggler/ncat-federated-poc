@@ -645,7 +645,7 @@ def upload_model(model, sample_count, metrics):
         logger.info(f"Serialized model into metadata payload: {type(metadata)}")
 
         # Send the metadata + serialized model as JSON
-        response = requests.post(f"{CENTRAL_SERVER}/model", json=metadata)
+        response = requests.post(f"{CENTRAL_SERVER}/upload", json=metadata)
 
         # Handle response
         if response.status_code == 200:
