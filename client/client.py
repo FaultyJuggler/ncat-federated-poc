@@ -5,6 +5,8 @@ import logging
 import requests
 import numpy as np
 import joblib
+import json
+import base64
 import pandas as pd
 import sys
 import traceback
@@ -625,58 +627,36 @@ def deserialize_model(serialized_params):
 
 
 def upload_model(model, sample_count, metrics):
-    """Upload the trained model to the central server"""
-    # Save model to a temporary file
-    os.makedirs(f"{DATASET_PATH}/models", exist_ok=True)
-    model_path = f"{DATASET_PATH}/models/model_{CLIENT_ID}_temp.joblib"
+    try:
+        # Serialize the SGDClassifier model as a binary string
+        model_bytes = joblib.dumps(model)
 
-    # Use compression for model file if on Apple Silicon (better I/O performance)
-    if platform_config['platform'] == 'apple_silicon':
-        joblib.dump(model, model_path, compress=3)
-    else:
-        joblib.dump(model, model_path)
+        # Optionally, encode the serialized model to a base64 string for safe JSON transport
+        model_encoded = base64.b64encode(model_bytes).decode('utf-8')
 
-    # Prepare metadata
-    metadata = {
-        "client_id": CLIENT_ID,
-        "sample_count": sample_count,
-        "metrics": metrics,
-        "platform": platform_config['platform'],
-        "use_gpu": platform_config['use_gpu']
-    }
+        # Create the JSON payload with metadata and the serialized model
+        metadata = {
+            'client_id': CLIENT_ID,
+            'sample_count': sample_count,
+            'metrics': metrics,
+            'model': model_encoded  # Include the serialized model
+        }
+        logger.info(f"Serialized model into metadata payload: {type(metadata)}")
 
-    # Debug output to see what we're sending
-    logger.info(f"Serialized metadata: {type(metadata)}")
+        # Send the metadata + serialized model as JSON
+        response = requests.post(f"{CENTRAL_SERVER}/model", json=metadata)
 
-    # Open the model file for upload
-    files = {
-        'model_file': open(model_path, 'rb')
-    }
+        # Handle the server response
+        if response.status_code == 200:
+            logger.info(f"Successfully uploaded model metadata. Response: {response.text}")
+            return True
+        else:
+            logger.warning(f"Failed to upload: {response.status_code}, {response.text}")
+            return False
 
-    for retry in range(MAX_RETRIES):
-        try:
-            # Send model file and metadata to server
-            with open(model_path, 'rb') as model_file:
-                files = {'model_file': model_file}
-                response = requests.post(
-                    f"{CENTRAL_SERVER}/upload",
-                    files=files,
-                    data={'json': json.dumps(metadata)}
-                )
-
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.warning(f"Failed to upload model: {response.status_code}, {response.text}")
-        except Exception as e:
-            logger.error(f"Error uploading model: {e}")
-
-        # Retry after delay
-        logger.info(f"Retrying in {RETRY_DELAY} seconds... (Attempt {retry + 1}/{MAX_RETRIES})")
-        time.sleep(RETRY_DELAY)
-
-    raise Exception("Failed to upload model after maximum retries")
-
+    except Exception as e:
+        logger.error(f"Error while uploading model: {str(e)}")
+        return False
 
 def main():
     """Main function to run the client in the federated learning process"""

@@ -698,7 +698,6 @@ def upload_model():
         "message": f"Model received from client {client_id}"
     })
 
-
 @app.route('/metrics', methods=['GET'])
 def get_metrics():
     """Return training metrics for all rounds"""
