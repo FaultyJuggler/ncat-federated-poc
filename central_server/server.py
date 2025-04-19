@@ -4,7 +4,9 @@ import time
 import logging
 import threading
 import numpy as np
-import joblib
+import json
+import pickle  # For in-memory model serialization
+import base64
 from flask import Flask, jsonify, request, Response
 import sys
 
@@ -662,41 +664,36 @@ def get_model():
 
 @app.route('/upload', methods=['POST'])
 def upload_model():
-    """Receive a trained model from a client"""
-    # Extract metadata
-    data = request.json
-    client_id = data['client_id']
-    sample_count = data['sample_count']
-    metrics = data.get('metrics', {})
+    if request.content_type and 'application/json' in request.content_type:
+        data = request.json
+        client_id = data['client_id']
+        sample_count = data['sample_count']
+        metrics = data.get('metrics', {})
+        model_encoded = data.get('model')
 
-    logger.info(f"Received model metadata from client {client_id} with {sample_count} samples")
+        # Decode and deserialize the model
+        if model_encoded:
+            model_bytes = base64.b64decode(model_encoded)
+            model = pickle.loads(model_bytes)  # Deserialize back to the model object
+            logger.info(f"Successfully deserialized model for client {client_id}")
 
-    # For model types like XGBoost and RandomForest, we'll save the model file separately
-    if 'model_file' in request.files:
-        model_file = request.files['model_file']
-        os.makedirs("models", exist_ok=True)
-        model_path = f"models/{client_id}_round_{current_round}.joblib"
-        model_file.save(model_path)
-        logger.info(f"Saved model file to {model_path}")
+        # Save metadata in memory
+        with lock:
+            client_models[client_id] = {
+                'sample_count': sample_count,
+                'metrics': metrics,
+                'model': model,  # Store the deserialized model (optional)
+                'timestamp': time.time()
+            }
 
-    # Store the client model metadata
-    with lock:
-        client_models[client_id] = {
-            'sample_count': sample_count,
-            'metrics': metrics,
-            'timestamp': time.time()
-        }
+        return jsonify({
+            "status": "success",
+            "message": f"Model received from client {client_id}",
+            "current_round": current_round,
+        }), 200
+    else:
+        return jsonify({"error": "Unsupported Content-Type"}), 415
 
-    # Check if we should perform federated averaging
-    if len(client_models) >= min_clients:
-        # Start a new thread to perform federated averaging
-        threading.Thread(target=federated_averaging).start()
-
-    return jsonify({
-        "status": "success",
-        "current_round": current_round,
-        "message": f"Model received from client {client_id}"
-    })
 
 @app.route('/metrics', methods=['GET'])
 def get_metrics():

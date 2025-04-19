@@ -6,6 +6,7 @@ import requests
 import numpy as np
 import joblib
 import json
+import pickle  # For in-memory model serialization
 import base64
 import pandas as pd
 import sys
@@ -628,25 +629,25 @@ def deserialize_model(serialized_params):
 
 def upload_model(model, sample_count, metrics):
     try:
-        # Serialize the SGDClassifier model as a binary string
-        model_bytes = joblib.dumps(model)
+        # Serialize the model to a binary string using pickle
+        model_bytes = pickle.dumps(model)
 
-        # Optionally, encode the serialized model to a base64 string for safe JSON transport
+        # Base64 encode the binary data to make it JSON-safe
         model_encoded = base64.b64encode(model_bytes).decode('utf-8')
 
-        # Create the JSON payload with metadata and the serialized model
+        # Create the metadata payload
         metadata = {
             'client_id': CLIENT_ID,
             'sample_count': sample_count,
-            'metrics': metrics,
-            'model': model_encoded  # Include the serialized model
+            'metrics': metrics,  # Optional: Add relevant metrics
+            'model': model_encoded  # Send the serialized model
         }
         logger.info(f"Serialized model into metadata payload: {type(metadata)}")
 
         # Send the metadata + serialized model as JSON
         response = requests.post(f"{CENTRAL_SERVER}/model", json=metadata)
 
-        # Handle the server response
+        # Handle response
         if response.status_code == 200:
             logger.info(f"Successfully uploaded model metadata. Response: {response.text}")
             return True
@@ -657,6 +658,7 @@ def upload_model(model, sample_count, metrics):
     except Exception as e:
         logger.error(f"Error while uploading model: {str(e)}")
         return False
+
 
 def main():
     """Main function to run the client in the federated learning process"""
