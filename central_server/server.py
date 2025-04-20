@@ -555,90 +555,65 @@ def federated_averaging():
     """Perform federated model merging on collected client models"""
     global global_model, client_models, current_round, is_training_complete, model_type
 
-    with lock:
-        if len(client_models) < min_clients:
-            logger.info(f"Waiting for more clients. Current: {len(client_models)}")
-            return
+    logger.info(f"Performing federated averaging for round {current_round}")
 
-        logger.info(f"Performing federated averaging for round {current_round}")
+    if len(client_models) == 0:
+        logger.warning("No client models available for aggregation")
+        return False
 
-        # Extract models and sample counts
-        models = []
-        sample_counts = []
+    # Collect models and their weights (sample counts)
+    models = []
+    weights = []
 
-        for client_id, model_info in client_models.items():
-            try:
-                # Reload model from the saved file
-                model_path = f"models/{client_id}_round_{current_round}.joblib"
-                if os.path.exists(model_path):
-                    client_model = joblib.load(model_path)
-                    models.append(client_model)
-                    sample_counts.append(model_info['sample_count'])
+    # Use the in-memory models directly from client_models dictionary
+    for client_id, client_data in client_models.items():
+        if 'model' in client_data and client_data['model'] is not None:
+            models.append(client_data['model'])
+            weights.append(client_data['sample_count'])
+            logger.info(f"Using in-memory model from client {client_id} with weight {client_data['sample_count']}")
+        else:
+            logger.warning(f"No valid model found for client {client_id}")
 
-                    # Update model type based on received model
-                    if hasattr(client_model, '_finalize_coef'):  # Check for SGD Classifier
-                        model_type = 'sgd'
-                    elif hasattr(client_model, 'estimators_'):
-                        model_type = 'randomforest'
-                    else:
-                        # Default to SGD as our preferred model type
-                        model_type = 'sgd'
-                else:
-                    logger.warning(f"Model file for {client_id} not found")
-            except Exception as e:
-                logger.error(f"Error loading model for {client_id}: {e}")
+    if len(models) == 0:
+        logger.warning("No valid models to aggregate")
+        return False
 
-        if not models:
-            logger.warning("No valid models to aggregate")
-            return
+    try:
+        # Normalize weights to sum to 1.0
+        total_samples = sum(weights)
+        weights = [w / total_samples for w in weights]
 
-        # Merge models using weighted voting
-        try:
-            # If mixed model types are received, log warning
-            if len(set(model_type for model in models
-                       if hasattr(model, '_finalize_coef') or
-                          hasattr(model, 'tree_method') or
-                          hasattr(model, 'estimators_'))) > 1:
-                logger.warning("Mixed model types detected. Using SGD model type as default.")
-                model_type = 'sgd'  # Force SGD as our default
+        # Perform weighted averaging of SGD Classifier models
+        # This assumes the models are SGD Classifiers or similar sklearn models
+        # where we can directly access and average coefficients
+        if isinstance(models[0], SGDClassifier):  # Adjust based on your actual model type
+            # Create a new model with the same parameters
+            aggregated_model = clone(models[0])
 
-            global_model = merge_models(models, sample_counts)
+            # Average the coefficients and intercepts
+            if hasattr(models[0], 'coef_'):
+                # For multi-class, coef_ might be a list of arrays
+                aggregated_model.coef_ = sum(model.coef_ * weight for model, weight in zip(models, weights))
 
-            # Save the global model
-            os.makedirs("models", exist_ok=True)
-            global_model_path = f"models/global_round_{current_round}.joblib"
-            joblib.dump(global_model, global_model_path)
-            logger.info(f"Saved global model to {global_model_path}")
+            if hasattr(models[0], 'intercept_'):
+                aggregated_model.intercept_ = sum(model.intercept_ * weight for model, weight in zip(models, weights))
 
-        except Exception as e:
-            logger.error(f"Error merging models: {e}")
-            logger.error(f"Exception details: {str(e)}")
-            traceback.print_exc()
-            return
+            global_model = aggregated_model
+        else:
+            # For custom model types, use your existing merge_models function
+            global_model = merge_models(models, weights)
 
-        # Save metrics for this round
-        current_metrics = {
-            "round": current_round,
-            "clients": list(client_models.keys()),
-            "avg_accuracy": np.mean([m['metrics']['accuracy'] for m in client_models.values() if 'metrics' in m]),
-            "model_type": model_type
-        }
-        round_metrics.append(current_metrics)
-        logger.info(f"Round {current_round} metrics: {current_metrics}")
+        # Optionally save the global model to disk for persistence
+        model_path = os.path.join(DATA_DIR, f"global_model_round_{current_round}.joblib")
+        joblib.dump(global_model, model_path)
+        logger.info(f"Saved aggregated global model for round {current_round} to {model_path}")
 
-        # Reset client models for next round
-        client_models.clear()
-
-        # Increment round counter
-        current_round += 1
-
-        # Check if training is complete
-        if current_round >= total_rounds:
-            logger.info(f"Federated learning completed after {total_rounds} rounds")
-            is_training_complete = True
-            # Save the final model
-            joblib.dump(global_model, "final_model.joblib")
-
+        return True
+    except Exception as e:
+        logger.error(f"Error during federated averaging: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
 
 
 # API endpoints
