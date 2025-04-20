@@ -856,4 +856,70 @@ def main():
                     current_round = round_number
 
                     # Load the dataset
-                    file_path,
+                    file_path, X_train, y_train, X_test, y_test = load_data_for_batch_processing(
+                        DATASET_PATH,
+                        DATA_SOURCE,
+                        PARQUET_FILE,
+                        TARGET_COLUMN
+                    )
+
+                    # Train the model in batches
+                    logger.info(f"Training model for round {current_round}")
+                    train_start = time.time()
+
+                    # Create the batch processor
+                    processor = BatchProcessor(file_path, TARGET_COLUMN, BATCH_SIZE)
+
+                    # Get unique classes for partial_fit
+                    unique_classes = get_unique_classes(processor)
+
+                    if USE_PARTIAL_FIT:
+                        model = train_model_in_batches(
+                            model,
+                            processor,
+                            unique_classes=unique_classes
+                        )
+                    else:
+                        # For models that don't support partial_fit
+                        model.fit(X_train, y_train)
+
+                    train_time = time.time() - train_start
+                    logger.info(f"Training completed in {train_time:.2f} seconds")
+
+                    # Evaluate the model
+                    logger.info("Evaluating trained model")
+                    eval_metrics = evaluate_model_in_batches(model, processor)
+
+                    logger.info(f"Evaluation metrics: {eval_metrics}")
+
+                    # Upload the model to the server
+                    logger.info(f"Uploading trained model for round {current_round}")
+                    upload_success = upload_model(model, current_round, eval_metrics)
+
+                    if upload_success:
+                        logger.info(f"Model successfully uploaded for round {current_round}")
+                    else:
+                        logger.error(f"Failed to upload model for round {current_round}")
+
+                else:
+                    logger.warning("Failed to get global model. Retrying...")
+                    time.sleep(RETRY_DELAY)
+
+            # Check if training is complete
+            if status.get('training_complete', False):
+                logger.info("Training is marked as complete by the server. Exiting...")
+                training_complete = True
+            else:
+                # Wait before checking again
+                time.sleep(5)
+
+        except Exception as e:
+            logger.error(f"Error in federated learning loop: {str(e)}")
+            logger.error(traceback.format_exc())
+            time.sleep(RETRY_DELAY)
+
+    logger.info("Client shutting down")
+
+
+if __name__ == "__main__":
+    main()
