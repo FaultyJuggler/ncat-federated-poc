@@ -607,7 +607,9 @@ def federated_averaging():
             global_model = merge_models(models, weights)
 
         # Optionally save the global model to disk for persistence
-        model_path = os.path.join(DATA_DIR, f"global_model_round_{current_round}.joblib")
+        data_dir = os.path.join(os.path.dirname(__file__), "data")
+        os.makedirs(data_dir, exist_ok=True)  # Create directory if it doesn't exist
+        model_path = os.path.join(data_dir, f"global_model_round_{current_round}.joblib")
         joblib.dump(global_model, model_path)
         logger.info(f"Saved aggregated global model for round {current_round} to {model_path}")
 
