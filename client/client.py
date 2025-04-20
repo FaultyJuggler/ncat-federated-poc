@@ -12,6 +12,8 @@ import pandas as pd
 import sys
 import traceback
 import gc
+import torch
+from sklearn.base import BaseEstimator, ClassifierMixin
 
 # Add paths for imports
 sys.path.append('/')  # Add root directory to path for Docker container
@@ -55,6 +57,31 @@ logger.info(f"GPU enabled: {platform_config['use_gpu']}")
 MAX_RETRIES = 5
 RETRY_DELAY = 10  # seconds
 
+# Create a PyTorch-based SGD classifier wrapper
+class PyTorchSGDClassifier(BaseEstimator, ClassifierMixin):
+    def __init__(self, loss='log', penalty='l2', alpha=0.0001,
+                 max_iter=1000, tol=1e-3, random_state=42):
+        self.loss = loss
+        self.penalty = penalty
+        self.alpha = alpha
+        self.max_iter = max_iter
+        self.tol = tol
+        self.random_state = random_state
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = None
+        self.classes_ = None
+
+    def fit(self, X, y):
+        # Implementation would go here
+        pass
+
+    def predict(self, X):
+        # Implementation would go here
+        pass
+
+    def partial_fit(self, X, y, classes=None):
+        # Implementation would go here
+        pass
 
 def log_memory_usage():
     """Log current memory usage"""
@@ -557,35 +584,6 @@ def deserialize_model(serialized_params):
             # Try to use PyTorch if GPU acceleration is requested
             if use_gpu:
                 try:
-                    import torch
-                    from sklearn.base import BaseEstimator, ClassifierMixin
-
-                    # Create a PyTorch-based SGD classifier wrapper
-                    class PyTorchSGDClassifier(BaseEstimator, ClassifierMixin):
-                        def __init__(self, loss='log', penalty='l2', alpha=0.0001,
-                                     max_iter=1000, tol=1e-3, random_state=42):
-                            self.loss = loss
-                            self.penalty = penalty
-                            self.alpha = alpha
-                            self.max_iter = max_iter
-                            self.tol = tol
-                            self.random_state = random_state
-                            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                            self.model = None
-                            self.classes_ = None
-
-                        def fit(self, X, y):
-                            # Implementation would go here
-                            pass
-
-                        def predict(self, X):
-                            # Implementation would go here
-                            pass
-
-                        def partial_fit(self, X, y, classes=None):
-                            # Implementation would go here
-                            pass
-
                     # Extract SGD-specific parameters
                     sgd_params = {
                         'loss': serialized_params.get('loss', 'log'),
