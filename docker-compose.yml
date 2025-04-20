@@ -57,9 +57,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 40G
+          memory: 80G
         reservations:
-          memory: 24G
+          memory: 48G
           devices:
             - driver: nvidia
               count: 1
@@ -100,9 +100,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 40G
+          memory: 48G
         reservations:
-          memory: 24G
+          memory: 48G
           devices:
             - driver: nvidia
               count: 1
@@ -143,9 +143,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 40G
+          memory: 80G
         reservations:
-          memory: 24G
+          memory: 48G
           devices:
             - driver: nvidia
               count: 1
