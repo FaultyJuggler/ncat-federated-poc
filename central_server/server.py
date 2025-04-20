@@ -556,8 +556,7 @@ def merge_models(models, sample_counts):
 
 
 def federated_averaging():
-    """Perform federated model merging on collected client models"""
-    global global_model, client_models, current_round, is_training_complete, model_type
+    global global_model, current_round, client_models
 
     logger.info(f"Performing federated averaging for round {current_round}")
 
@@ -587,39 +586,48 @@ def federated_averaging():
         total_samples = sum(weights)
         weights = [w / total_samples for w in weights]
 
-        # Perform weighted averaging of SGD Classifier models
-        # This assumes the models are SGD Classifiers or similar sklearn models
-        # where we can directly access and average coefficients
-        if isinstance(models[0], SGDClassifier):  # Adjust based on your actual model type
+        # Check if model has coefficient and intercept attributes (like sklearn models)
+        if hasattr(models[0], 'coef_') and hasattr(models[0], 'intercept_'):
             # Create a new model with the same parameters
             aggregated_model = clone(models[0])
 
-            # Average the coefficients and intercepts
-            if hasattr(models[0], 'coef_'):
-                # For multi-class, coef_ might be a list of arrays
-                aggregated_model.coef_ = sum(model.coef_ * weight for model, weight in zip(models, weights))
+            # Average the coefficients
+            coefs = np.array([model.coef_ for model in models])
+            aggregated_model.coef_ = np.sum([coef * weight for coef, weight in zip(coefs, weights)], axis=0)
 
-            if hasattr(models[0], 'intercept_'):
-                aggregated_model.intercept_ = sum(model.intercept_ * weight for model, weight in zip(models, weights))
+            # Average the intercepts
+            intercepts = np.array([model.intercept_ for model in models])
+            aggregated_model.intercept_ = np.sum([intercept * weight for intercept, weight in zip(intercepts, weights)],
+                                                 axis=0)
 
             global_model = aggregated_model
+            logger.info("Successfully created aggregated model by averaging coefficients and intercepts")
         else:
             # For custom model types, use your existing merge_models function
+            logger.info("Models don't have standard coef_/intercept_ attributes, using custom merge function")
             global_model = merge_models(models, weights)
 
-        # Optionally save the global model to disk for persistence
-        data_dir = os.path.join(os.path.dirname(__file__), "data")
-        os.makedirs(data_dir, exist_ok=True)  # Create directory if it doesn't exist
-        model_path = os.path.join(data_dir, f"global_model_round_{current_round}.joblib")
-        joblib.dump(global_model, model_path)
-        logger.info(f"Saved aggregated global model for round {current_round} to {model_path}")
+        # Make sure the global model is valid
+        if global_model is not None:
+            # Define data directory and ensure it exists
+            data_dir = os.path.join(os.path.dirname(__file__), "data")
+            os.makedirs(data_dir, exist_ok=True)
 
-        return True
+            # Save the model
+            model_path = os.path.join(data_dir, f"global_model_round_{current_round}.joblib")
+            joblib.dump(global_model, model_path)
+            logger.info(f"Saved aggregated global model for round {current_round} to {model_path}")
+            return True
+        else:
+            logger.error("Failed to create a valid global model")
+            return False
+
     except Exception as e:
         logger.error(f"Error during federated averaging: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
         return False
+
 
 
 # API endpoints
@@ -676,20 +684,26 @@ def upload_model():
             try:
                 # Aggregate models using federated averaging
                 logger.info(f"All {min_clients} clients submitted models. Performing federated averaging...")
-                federated_averaging()
+                if federated_averaging():
+                    # Create metrics for this round
+                    metrics = {
+                        'participating_clients': len(client_models),
+                        'total_samples': sum(
+                            client_data['sample_count'] for client_id, client_data in client_models.items()),
+                        # Add any other metrics you want to track
+                    }
 
-                # Store round metrics
-                round_metrics[current_round] = {
-                    'client_metrics': {client_id: client_models[client_id]['metrics'] for client_id in
-                                       client_models}
-                }
+                    # Append to round_metrics list instead of using as a dictionary
+                    round_metrics.append(metrics)
 
-                # Increment round counter
-                current_round += 1
-                logger.info(f"Advanced to round {current_round}/{total_rounds}")
+                    # Advance to next round
+                    current_round += 1
+                    # Reset client models for the new round
+                    client_models = {}
 
-                # Clear client models for next round
-                client_models.clear()
+                    logger.info(f"Successfully completed round {current_round - 1}, advancing to round {current_round}")
+                else:
+                    logger.error("Federated averaging failed, not advancing to next round")
 
                 # Check if training is complete
                 if current_round >= total_rounds:
@@ -697,15 +711,15 @@ def upload_model():
                     logger.info("Training complete!")
             except Exception as e:
                 logger.error(f"Failed to advance round: {str(e)}")
-                return jsonify({"status": "error", "message": f"Failed to advance round: {str(e)}"}), 500
+                import traceback
 
-        return jsonify({
+                logger.error(traceback.format_exc())
+
+    return jsonify({
             "status": "success",
             "message": f"Model received from client {client_id}",
             "current_round": current_round,
         }), 200
-    else:
-        return jsonify({"error": "Unsupported Content-Type"}), 415
 
 
 @app.route('/metrics', methods=['GET'])
