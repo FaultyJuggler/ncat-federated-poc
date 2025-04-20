@@ -1,544 +1,694 @@
-import os
-import json
-import time
-import logging
-import requests
 import numpy as np
-import joblib
-import json
-import pickle  # For in-memory model serialization
-import base64
 import pandas as pd
+import os
 import sys
-import traceback
+import json
+import logging
+import pickle
+import requests
+import time
 import gc
+import platform
+import psutil
+import pyarrow as pa
+import pyarrow.parquet as pq
+from sklearn.base import BaseEstimator, ClassifierMixin
+import joblib  # Make sure this import is here
 
-# Add paths for imports
-sys.path.append('/')  # Add root directory to path for Docker container
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # Add parent dir
-
-try:
-    from platform_utils import detect_platform, optimize_model_params
-except ImportError:
-    print("Error: platform_utils.py not found in path")
-    print(f"Current sys.path: {sys.path}")
-    print("Looking for file in:")
-    for path in ['/platform_utils.py', './platform_utils.py', '../platform_utils.py']:
-        print(f"  {path}: {os.path.exists(path)}")
-    raise
-
-# Configure logging
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
-logger = logging.getLogger("client")
+logger = logging.getLogger('client')
 
-# Get environment variables
-CLIENT_ID = os.getenv("CLIENT_ID", "default")
-DATASET_PATH = os.getenv("DATASET_PATH", "/data")
-CENTRAL_SERVER = os.getenv("CENTRAL_SERVER", "http://central:8080")
-DATA_SOURCE = os.getenv("DATA_SOURCE", "mnist")  # Options: "mnist", "parquet"
-PARQUET_FILE = os.getenv("PARQUET_FILE", "")
-TARGET_COLUMN = os.getenv("TARGET_COLUMN", "label")
+# Configuration
+CLIENT_ID = os.environ.get('CLIENT_ID', 'client1')
+DATASET_PATH = os.environ.get('DATASET_PATH', '/app/data')
+CENTRAL_SERVER = os.environ.get('CENTRAL_SERVER', 'http://central:5000')
+DATA_SOURCE = os.environ.get('DATA_SOURCE', 'parquet')
+PARQUET_FILE = os.environ.get('PARQUET_FILE', 'adult.parquet')
+TARGET_COLUMN = os.environ.get('TARGET_COLUMN', 'income')
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', '10000'))
+USE_PARTIAL_FIT = os.environ.get('USE_PARTIAL_FIT', 'True').lower() == 'true'
 
-# Batch processing settings
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10000"))  # Number of rows to process at once
-USE_PARTIAL_FIT = os.getenv("USE_PARTIAL_FIT", "false").lower() == "true"  # Whether to use partial_fit or not
+# Platform-specific config
+platform_config = {
+    'use_gpu': os.environ.get('USE_GPU', 'False').lower() == 'true',
+}
 
-# Detect platform and get optimized parameters
-platform_config = detect_platform()
-logger.info(f"Running on detected platform: {platform_config['platform']}")
-logger.info(f"GPU enabled: {platform_config['use_gpu']}")
-
-# Training parameters
+# Network retry settings
 MAX_RETRIES = 5
-RETRY_DELAY = 10  # seconds
+RETRY_DELAY = 2
+
+# Create a PyTorch-based SGD classifier wrapper - Moved to top level
+try:
+    import torch
+
+
+    class PyTorchSGDClassifier(BaseEstimator, ClassifierMixin):
+        def __init__(self, loss='log', penalty='l2', alpha=0.0001,
+                     max_iter=1000, tol=1e-3, random_state=42):
+            self.loss = loss
+            self.penalty = penalty
+            self.alpha = alpha
+            self.max_iter = max_iter
+            self.tol = tol
+            self.random_state = random_state
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.model = None
+            self.classes_ = None
+
+        def fit(self, X, y):
+            # Implementation would go here
+            pass
+
+        def predict(self, X):
+            # Implementation would go here
+            pass
+
+        def partial_fit(self, X, y, classes=None):
+            # Implementation would go here
+            pass
+except ImportError:
+    # Define empty class if torch is not available to prevent errors
+    class PyTorchSGDClassifier:
+        def __init__(self, *args, **kwargs):
+            raise ImportError("PyTorch is not available")
 
 
 def log_memory_usage():
-    """Log current memory usage"""
-    try:
-        import psutil
-        usage = psutil.virtual_memory()
-        logger.info(
-            f"Memory usage: {usage.percent}% ({usage.used / 1024 / 1024:.1f}MB used out of {usage.total / 1024 / 1024:.1f}MB)")
-    except ImportError:
-        logger.warning("psutil not available, skipping memory usage logging")
+    """Log current memory usage."""
+    process = psutil.Process(os.getpid())
+
+    # Get memory info
+    mem_info = process.memory_info()
+
+    # Calculate usage in MB
+    rss_mb = mem_info.rss / (1024 * 1024)
+    vms_mb = mem_info.vms / (1024 * 1024)
+
+    # Get system memory info
+    system_mem = psutil.virtual_memory()
+    system_total_mb = system_mem.total / (1024 * 1024)
+    system_available_mb = system_mem.available / (1024 * 1024)
+
+    logger.info(f"Memory Usage - Process: {rss_mb:.2f} MB (RSS), {vms_mb:.2f} MB (VMS), "
+                f"System: {system_available_mb:.2f} MB available of {system_total_mb:.2f} MB total")
 
 
 class BatchProcessor:
-    """Class to handle batch processing of Parquet files with improved memory management"""
+    """
+    Handles efficient batch processing of datasets for ML training.
+    """
 
     def __init__(self, file_path, target_column, batch_size=10000):
-        """Initialize the batch processor"""
+        """
+        Initialize the BatchProcessor.
+
+        Args:
+            file_path: Path to the parquet file
+            target_column: Name of the target column
+            batch_size: Size of batches to process at once
+        """
         self.file_path = file_path
         self.target_column = target_column
         self.batch_size = batch_size
-        self.total_rows = 0
-        self.feature_cols = []
-        self.categorical_cols = []
-        self.num_features = 0
+        self.total_rows = None
+        self.feature_cols = None
+        self.categorical_cols = None
+        self.num_features = None
         self.has_initialized = False
 
     def initialize(self):
-        """Initialize by reading metadata and preparing for batch processing"""
-        logger.info(f"Initializing batch processor for {self.file_path}")
-        log_memory_usage()
+        """
+        Perform initialization tasks:
+        - Analyze parquet file metadata
+        - Determine features and data types
+        - Set up preprocessing if needed
+        """
+        if self.has_initialized:
+            return
+
+        logger.info(f"Initializing BatchProcessor for {self.file_path}")
 
         try:
-            # Use PyArrow to efficiently read metadata
-            import pyarrow.parquet as pq
-
-            # Get file metadata
+            # Open the parquet file to get metadata
             parquet_file = pq.ParquetFile(self.file_path)
-            self.total_rows = parquet_file.metadata.num_rows
-            logger.info(f"Total rows in Parquet file: {self.total_rows}")
 
-            # Read a small sample to determine schema and datatypes
-            # Only read first 100 rows for schema detection
-            sample = next(self._read_parquet_chunks(parquet_file, max_chunks=1, rows_per_chunk=100))
+            # Get the schema
+            schema = parquet_file.schema
 
-            # Make sure target column exists
-            if self.target_column not in sample.columns:
-                raise ValueError(f"Target column '{self.target_column}' not found in Parquet file")
+            # Extract column names and types
+            all_columns = [field.name for field in schema]
 
-            # Identify feature columns and categorical columns
-            self.feature_cols = [col for col in sample.columns if col != self.target_column]
-            self.categorical_cols = sample[self.feature_cols].select_dtypes(
-                include=['object', 'category']).columns.tolist()
+            # Exclude the target column from features
+            if self.target_column in all_columns:
+                self.feature_cols = [col for col in all_columns if col != self.target_column]
+            else:
+                logger.error(f"Target column '{self.target_column}' not found in dataset")
+                raise ValueError(f"Target column '{self.target_column}' not found in dataset")
 
-            logger.info(
-                f"Identified {len(self.feature_cols)} feature columns and {len(self.categorical_cols)} categorical columns")
+            # Determine categorical columns by checking data types
+            # For this simple version, we assume string columns are categorical
+            self.categorical_cols = []
+            for col in self.feature_cols:
+                field = schema.field(col)
+                if pa.types.is_string(field.type):
+                    self.categorical_cols.append(col)
 
-            # Extract basic information but don't do full one-hot encoding
-            self.num_features = len(self.feature_cols)
-            if self.categorical_cols:
-                logger.info("Using simple label encoding for categorical features to save memory")
+            # Count total rows if possible from metadata
+            metadata = parquet_file.metadata
+            if metadata:
+                self.total_rows = metadata.num_rows
+
+            # If rows not in metadata, need to calculate it
+            if not self.total_rows:
+                logger.info("Row count not in metadata, counting rows...")
+                self.total_rows = sum(1 for _ in self._read_parquet_chunks())
+
+            # Determine the number of features after one-hot encoding
+            # Need to read the first batch to determine this
+            for batch_df in self._read_parquet_chunks():
+                # Only process the first batch
+                X, _ = self._prepare_batch(batch_df)
+                self.num_features = X.shape[1]
+                break
+
+            logger.info(f"Initialization complete: {len(self.feature_cols)} columns, "
+                        f"{len(self.categorical_cols)} categorical, "
+                        f"{self.num_features} features after preprocessing, "
+                        f"{self.total_rows} total rows")
 
             self.has_initialized = True
 
-            # Force cleanup
-            del sample
-            del parquet_file
-            gc.collect()
-
         except Exception as e:
-            logger.error(f"Error initializing batch processor: {str(e)}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Error initializing BatchProcessor: {e}")
             raise
 
     def get_total_rows(self):
-        """Return the total number of rows in the file"""
+        """
+        Return the total number of rows in the dataset.
+        """
         if not self.has_initialized:
             self.initialize()
+
         return self.total_rows
 
     def get_num_features(self):
-        """Return the number of features after encoding"""
+        """
+        Return the number of features after preprocessing.
+        """
         if not self.has_initialized:
             self.initialize()
+
         return self.num_features
 
-    def _read_parquet_chunks(self, parquet_file=None, max_chunks=None, rows_per_chunk=None):
-        """Generator to read chunks of a parquet file with controlled memory usage"""
-        if parquet_file is None:
-            import pyarrow.parquet as pq
+    def _read_parquet_chunks(self):
+        """
+        Generator that reads the parquet file in chunks.
+
+        Yields:
+            DataFrame: pandas DataFrame containing a batch of data
+        """
+        try:
+            # Memory-efficient way to read parquet file in chunks
             parquet_file = pq.ParquetFile(self.file_path)
 
-        num_row_groups = parquet_file.metadata.num_row_groups
-        chunks_read = 0
+            # Get the schema
+            schema = parquet_file.schema
 
-        for row_group_idx in range(num_row_groups):
-            if max_chunks is not None and chunks_read >= max_chunks:
-                break
+            # Determine the number of row groups
+            num_row_groups = parquet_file.num_row_groups
 
-            try:
-                # Read a row group
-                table = parquet_file.read_row_group(row_group_idx)
+            # Process each row group
+            for i in range(num_row_groups):
+                # Read a single row group
+                table = parquet_file.read_row_group(i)
+
+                # Convert to pandas DataFrame
                 df = table.to_pandas()
 
-                if rows_per_chunk is not None and rows_per_chunk < len(df):
-                    # Split into smaller chunks if needed
-                    for i in range(0, len(df), rows_per_chunk):
-                        chunks_read += 1
-                        if max_chunks is not None and chunks_read > max_chunks:
-                            break
+                # Ensure the target column exists
+                if self.target_column not in df.columns:
+                    logger.error(f"Target column '{self.target_column}' not found in row group {i}")
+                    continue
 
-                        chunk = df.iloc[i:i + rows_per_chunk].copy()
-                        yield chunk
+                # Process in batch_size chunks to maintain consistent batch sizes
+                for start_idx in range(0, len(df), self.batch_size):
+                    end_idx = min(start_idx + self.batch_size, len(df))
+                    yield df.iloc[start_idx:end_idx].copy()
 
-                        # Force cleanup of the chunk
-                        del chunk
-                        gc.collect()
-                else:
-                    chunks_read += 1
-                    yield df
+        except Exception as e:
+            logger.error(f"Error reading parquet file: {e}")
+            raise
 
-                # Force cleanup of the dataframe and table
-                del df
-                del table
-                gc.collect()
+    def _prepare_batch(self, batch_df):
+        """
+        Prepare a batch for ML processing:
+        - Split features and target
+        - Handle categorical features (one-hot encoding)
+        - Convert to numpy arrays
 
-            except Exception as e:
-                logger.error(f"Error reading row group {row_group_idx}: {str(e)}")
-                continue
+        Args:
+            batch_df: Pandas DataFrame containing a batch of data
 
-    def batch_iterator(self, max_rows=None):
-        """Generator to yield batches of data from the Parquet file with optimized memory usage"""
+        Returns:
+            tuple: (X, y) where X is feature matrix and y is target vector
+        """
+        # Separate features and target
+        X_df = batch_df[self.feature_cols]
+        y = batch_df[self.target_column].values
+
+        # One-hot encode categorical features
+        if self.categorical_cols:
+            X_df = pd.get_dummies(X_df, columns=self.categorical_cols, drop_first=True)
+
+        # Convert to numpy array
+        X = X_df.values
+
+        return X, y
+
+    def batch_iterator(self):
+        """
+        Generate batches of preprocessed data.
+
+        Yields:
+            tuple: (X, y, batch_info) where:
+                - X is feature matrix
+                - y is target vector
+                - batch_info is a dict with metadata about the batch
+        """
         if not self.has_initialized:
             self.initialize()
 
-        import pyarrow.parquet as pq
+        logger.info(f"Starting batch iteration with batch size {self.batch_size}")
 
-        # Determine how many rows to read
-        rows_to_read = min(self.total_rows, max_rows) if max_rows else self.total_rows
-        logger.info(f"Will read up to {rows_to_read} rows in batches of {self.batch_size}")
+        batch_count = 0
+        total_rows_processed = 0
 
-        rows_read = 0
-
-        # Use chunk reader instead of loading row groups directly
-        for chunk_df in self._read_parquet_chunks(rows_per_chunk=min(50000, self.batch_size * 5)):
-            if rows_read >= rows_to_read:
-                break
-
-            # Process in batch_size chunks
-            for start_idx in range(0, len(chunk_df), self.batch_size):
-                if rows_read >= rows_to_read:
-                    break
-
-                end_idx = min(start_idx + self.batch_size, len(chunk_df))
-                batch_df = chunk_df.iloc[start_idx:end_idx].copy()
-
-                # Process features and target
-                X_batch = batch_df[self.feature_cols].copy()
-                y_batch = batch_df[self.target_column].copy()
-
-                # Release batch_df memory
-                del batch_df
-
-                # Handle categorical variables with simple label encoding
-                if self.categorical_cols:
-                    for col in self.categorical_cols:
-                        # Check if column exists (defensive coding)
-                        if col in X_batch.columns:
-                            # Simple label encoding uses less memory than one-hot
-                            X_batch[col] = pd.factorize(X_batch[col])[0]
-
-                # Convert to numpy arrays
-                X_batch_np = X_batch.to_numpy().astype('float32')
-                y_batch_np = y_batch.to_numpy()
-
-                # Release pandas memory
-                del X_batch
-                del y_batch
-
-                rows_read += len(X_batch_np)
-
-                # Force garbage collection before yielding
-                gc.collect()
-
-                yield X_batch_np, y_batch_np
-
-                # Force garbage collection after processing
-                gc.collect()
-
-            # Explicitly delete chunk_df after processing
-            del chunk_df
-            gc.collect()
-
-            # Log progress
-            logger.info(f"Processed {rows_read}/{rows_to_read} rows")
-
-
-def batch_iterator_memory_safe(self, max_rows=None):
-    """Ultra memory-safe batch iterator that skips categorical encoding completely"""
-    if not self.has_initialized:
-        self.initialize()
-
-    import pyarrow.parquet as pq
-    parquet_file = pq.ParquetFile(self.file_path)
-
-    # Determine how many rows to read
-    rows_to_read = min(self.total_rows, max_rows) if max_rows else self.total_rows
-    logger.info(f"Memory-safe mode: Will read up to {rows_to_read} rows in batches of {self.batch_size}")
-
-    rows_read = 0
-    row_group_index = 0
-
-    while rows_read < rows_to_read and row_group_index < parquet_file.metadata.num_row_groups:
         try:
-            df = parquet_file.read_row_group(row_group_index).to_pandas()
-            row_group_index += 1
+            for batch_df in self._read_parquet_chunks():
+                # Prepare the batch
+                X, y = self._prepare_batch(batch_df)
 
-            # Process in batch_size chunks
-            start_idx = 0
-            while start_idx < len(df) and rows_read < rows_to_read:
-                end_idx = min(start_idx + self.batch_size, len(df))
-                batch_df = df.iloc[start_idx:end_idx]
+                # Create batch info
+                batch_info = {
+                    'batch_index': batch_count,
+                    'batch_size': len(y),
+                    'batch_columns': list(batch_df.columns),
+                    'batch_categorical': self.categorical_cols.copy() if self.categorical_cols else [],
+                }
 
-                # ULTRA SAFE: Skip all categorical processing
-                # Just use numerical columns and convert categoricals to simple integers
-                X_batch = batch_df.drop(columns=[self.target_column])
-                y_batch = batch_df[self.target_column]
+                # Update counters
+                batch_count += 1
+                total_rows_processed += len(y)
 
-                for col in X_batch.select_dtypes(include=['object', 'category']).columns:
-                    # Simple label encoding
-                    X_batch[col] = pd.factorize(X_batch[col])[0]
+                # Log progress
+                if batch_count % 10 == 0:
+                    progress = (total_rows_processed / self.total_rows) * 100
+                    logger.info(f"Processed {batch_count} batches, {total_rows_processed} rows "
+                                f"({progress:.1f}% complete)")
+                    log_memory_usage()
 
-                # Convert to numpy arrays
-                X_batch = X_batch.to_numpy().astype('float32')
-                y_batch = y_batch.to_numpy()
+                yield X, y, batch_info
 
-                batch_rows = len(X_batch)
-                rows_read += batch_rows
-
-                # Force garbage collection
-                gc.collect()
-
-                yield X_batch, y_batch
-
-                start_idx += self.batch_size
-
-            # Clean up to save memory
-            del df
-            gc.collect()
+            logger.info(f"Batch iteration complete: {batch_count} batches, {total_rows_processed} rows")
 
         except Exception as e:
-            logger.error(f"Error processing row group {row_group_index - 1}: {str(e)}")
-            row_group_index += 1  # Skip to next row group on error
-
-def get_unique_classes(self):
-    """Return all unique classes in the dataset"""
-    # Implementation depends on your data structure
-    unique_classes = pd.read_parquet(self.file_path, columns=[self.target_column])[self.target_column].unique()
-    return unique_classes
+            logger.error(f"Error during batch iteration: {e}")
+            raise
 
 
-def train_model_in_batches(model, batch_processor, max_rows=None):
-    """Train model using batches of data to manage memory usage"""
-    logger.info(f"Starting batch training with max_rows={max_rows}")
+def batch_iterator_memory_safe(file_path, target_column, batch_size):
+    """
+    A memory-safe iterator that processes data in batches.
 
-    log_memory_usage()
+    This function is a wrapper around BatchProcessor for simpler use cases.
 
-    logger.info("Using partial_fit for incremental training")
+    Args:
+        file_path: Path to the parquet file
+        target_column: Name of the target column
+        batch_size: Size of batches to process
 
-    total_rows_processed = 0
-    batch_count = 0
+    Yields:
+        tuple: (X, y) pairs for each batch
+    """
+    processor = BatchProcessor(file_path, target_column, batch_size)
+
+    for X, y, _ in processor.batch_iterator():
+        yield X, y
+
+
+def get_unique_classes(file_path, target_column, batch_size=10000):
+    """
+    Extract unique classes from the dataset.
+
+    Args:
+        file_path: Path to the parquet file
+        target_column: Name of the target column
+        batch_size: Size of batches to process
+
+    Returns:
+        array: Array of unique class values
+    """
+    logger.info(f"Extracting unique classes from {file_path}")
+    unique_classes = set()
+
+    # Process in batches to handle large datasets
+    for _, y in batch_iterator_memory_safe(file_path, target_column, batch_size):
+        # Update set with new unique values
+        unique_classes.update(np.unique(y))
+
+    logger.info(f"Found {len(unique_classes)} unique classes: {unique_classes}")
+    return np.array(sorted(list(unique_classes)))
+
+
+def train_model_in_batches(model, file_path, target_column, batch_size=10000):
+    """
+    Train a model using batches to handle large datasets.
+
+    Args:
+        model: The model to train (must support fit or partial_fit)
+        file_path: Path to the parquet file
+        target_column: Name of the target column
+        batch_size: Size of batches to train on
+
+    Returns:
+        model: The trained model
+        dict: Training metrics
+    """
+    logger.info(f"Starting batch training with batch size {batch_size}")
     start_time = time.time()
 
-    # Define classes for binary classification (goodware=0, malware=1)
-    all_classes = np.array([0, 1])
-
-    try:
-        for X_batch, y_batch in batch_processor.batch_iterator():
-            batch_size = X_batch.shape[0]
-
-            if max_rows and total_rows_processed + batch_size > max_rows:
-                # Trim the batch to respect max_rows
-                rows_to_take = max_rows - total_rows_processed
-                X_batch = X_batch[:rows_to_take]
-                y_batch = y_batch[:rows_to_take]
-                batch_size = rows_to_take
-
-            # On first batch, pass the classes parameter
-            if batch_count == 0:
-                model.partial_fit(X_batch, y_batch, classes=all_classes)
-                logger.info(f"First batch processed with classes: {all_classes}")
-            else:
-                model.partial_fit(X_batch, y_batch)
-
-            total_rows_processed += batch_size
-            batch_count += 1
-            logger.info(f"Processed batch: {batch_size} samples, total: {total_rows_processed}")
-
-            if max_rows and total_rows_processed >= max_rows:
-                logger.info(f"Reached max_rows limit ({max_rows}), stopping training")
-                break
-
-        logger.info(f"Completed batch training, processed {total_rows_processed} samples")
-        training_time = time.time() - start_time
-        logger.info(f"Training completed in {training_time:.2f} seconds")
-        logger.info(f"Processed {total_rows_processed} rows in {batch_count} batches")
-
-        return model
-    except Exception as e:
-        logger.error(f"Error training model: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
-
-def evaluate_model_in_batches(model, batch_processor, max_rows=None):
-    """Evaluate a model using batches of data"""
-    logger.info("Starting batch evaluation...")
-    log_memory_usage()
-
-    total_correct = 0
+    # Counters for tracking progress
     total_rows = 0
     batch_count = 0
+
+    # If USE_PARTIAL_FIT is True, we'll use partial_fit for incremental training
+    # First, we need to get unique classes for partial_fit
+    if USE_PARTIAL_FIT and hasattr(model, 'partial_fit'):
+        classes = get_unique_classes(file_path, target_column, batch_size)
+
+        # Train on each batch incrementally
+        for X, y in batch_iterator_memory_safe(file_path, target_column, batch_size):
+            if batch_count == 0:
+                # First batch call includes classes
+                model.partial_fit(X, y, classes=classes)
+            else:
+                model.partial_fit(X, y)
+
+            total_rows += len(y)
+            batch_count += 1
+
+            # Log progress
+            if batch_count % 5 == 0:
+                elapsed = time.time() - start_time
+                logger.info(f"Processed {batch_count} batches, {total_rows} rows in {elapsed:.2f} seconds")
+                log_memory_usage()
+
+    else:
+        # If partial_fit is not available or not requested, collect all data and use fit
+        # Warning: This could use a lot of memory for large datasets
+        logger.warning("Using standard fit() method, which may require more memory")
+
+        all_X = []
+        all_y = []
+
+        for X, y in batch_iterator_memory_safe(file_path, target_column, batch_size):
+            all_X.append(X)
+            all_y.append(y)
+            total_rows += len(y)
+            batch_count += 1
+
+            # Log progress
+            if batch_count % 5 == 0:
+                logger.info(f"Loaded {batch_count} batches, {total_rows} rows")
+                log_memory_usage()
+
+        # Combine all data
+        X_combined = np.vstack(all_X)
+        y_combined = np.concatenate(all_y)
+
+        logger.info(f"Training on combined dataset with {X_combined.shape[0]} rows")
+        model.fit(X_combined, y_combined)
+
+    # Training complete, calculate metrics
+    elapsed = time.time() - start_time
+    metrics = {
+        'total_time': elapsed,
+        'total_rows': total_rows,
+        'batches': batch_count,
+        'rows_per_second': total_rows / elapsed if elapsed > 0 else 0,
+    }
+
+    logger.info(f"Training complete. Processed {total_rows} rows in {elapsed:.2f} seconds")
+    return model, metrics
+
+
+def evaluate_model_in_batches(model, file_path, target_column, batch_size=10000):
+    """
+    Evaluate model accuracy using batches to handle large datasets.
+
+    Args:
+        model: The trained model (must have predict method)
+        file_path: Path to the parquet file
+        target_column: Name of the target column
+        batch_size: Size of batches for evaluation
+
+    Returns:
+        dict: Evaluation metrics
+    """
+    logger.info(f"Starting batch evaluation with batch size {batch_size}")
     start_time = time.time()
 
-    y_true_all = []
-    y_pred_all = []
+    # Counters for metrics
+    total_rows = 0
+    total_correct = 0
+    batch_count = 0
 
-    for X_batch, y_batch in batch_processor.batch_iterator(max_rows):
-        batch_count += 1
-        batch_size = len(X_batch)
+    try:
+        # Evaluate on each batch
+        for X, y in batch_iterator_memory_safe(file_path, target_column, batch_size):
+            # Make predictions
+            if hasattr(model, 'predict'):
+                predictions = model.predict(X)
 
-        with joblib.parallel_backend('threading', n_jobs=platform_config['n_jobs']):
-            y_pred = model.predict(X_batch)
+                # Calculate batch accuracy
+                correct = (predictions == y).sum()
+                total_correct += correct
+                total_rows += len(y)
+                batch_count += 1
 
-        # Collect true and predicted values for final metrics
-        y_true_all.extend(y_batch)
-        y_pred_all.extend(y_pred)
-
-        # Update counters
-        total_rows += batch_size
-
-        if batch_count % 10 == 0:
-            logger.info(f"Evaluated {batch_count} batches, {total_rows} rows so far")
-
-    # Calculate overall metrics
-    from sklearn.metrics import accuracy_score, classification_report
-    accuracy = accuracy_score(y_true_all, y_pred_all)
-
-    eval_time = time.time() - start_time
-    logger.info(f"Evaluation completed in {eval_time:.2f} seconds")
-    logger.info(f"Processed {total_rows} rows in {batch_count} batches")
-    logger.info(f"Test accuracy: {accuracy:.4f}")
-    logger.info("\nClassification Report:\n" + classification_report(y_true_all, y_pred_all))
-
-    return {"accuracy": accuracy}
-
-
-def load_data_for_batch_processing():
-    """Set up batch processing for data"""
-    if DATA_SOURCE.lower() == "parquet" and PARQUET_FILE:
-        # Initialize batch processor for Parquet file
-        batch_processor = BatchProcessor(PARQUET_FILE, TARGET_COLUMN, BATCH_SIZE)
-        batch_processor.initialize()
-        return batch_processor
-    else:
-        # For MNIST, load the whole dataset as before
-        logger.info("Loading MNIST dataset...")
-        X_path = os.path.join(DATASET_PATH, "X.npy")
-        y_path = os.path.join(DATASET_PATH, "y.npy")
-
-        if os.path.exists(X_path) and os.path.exists(y_path):
-            logger.info("Loading MNIST data from cache...")
-            X = np.load(X_path)
-            y = np.load(y_path)
+                # Log progress
+                if batch_count % 5 == 0:
+                    batch_accuracy = correct / len(y)
+                    logger.info(f"Batch {batch_count} accuracy: {batch_accuracy:.4f}")
+            else:
+                logger.error("Model does not have predict method")
+                raise AttributeError("Model does not have predict method")
+    except Exception as e:
+        logger.error(f"Error evaluating model: {str(e)}")
+        # Return partial results if possible
+        if total_rows > 0:
+            accuracy = total_correct / total_rows
+            elapsed = time.time() - start_time
+            return {
+                'accuracy': accuracy,
+                'total_rows': total_rows,
+                'total_correct': total_correct,
+                'evaluation_time': elapsed,
+                'error': str(e)
+            }
         else:
-            # Load MNIST dataset
-            logger.info("Downloading MNIST dataset...")
-            try:
-                from sklearn.datasets import fetch_openml
-                mnist = fetch_openml('mnist_784', version=1, cache=True)
-                X = mnist.data.astype('float32') / 255.0  # Normalize
-                y = mnist.target
-            except Exception as e:
-                logger.error(f"Error downloading MNIST: {e}")
-                # Create simple dummy data
-                logger.info("Creating dummy data instead")
-                X = np.random.rand(1000, 784).astype('float32')
-                y = np.random.randint(0, 10, size=1000).astype(str)
+            raise
 
-            # Save data for future use
-            np.save(X_path, X)
-            np.save(y_path, y)
+    # Calculate overall accuracy
+    accuracy = total_correct / total_rows if total_rows > 0 else 0
+    elapsed = time.time() - start_time
 
-        from sklearn.model_selection import train_test_split
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    metrics = {
+        'accuracy': accuracy,
+        'total_rows': total_rows,
+        'total_correct': total_correct,
+        'evaluation_time': elapsed,
+        'batches': batch_count
+    }
 
-        # Create a simple batch processor for in-memory data
-        class InMemoryBatchProcessor:
-            def __init__(self, X, y, batch_size):
-                self.X = X
-                self.y = y
-                self.batch_size = batch_size
-                self.total_rows = len(X)
-                self.num_features = X.shape[1]
+    logger.info(f"Evaluation complete. Accuracy: {accuracy:.4f} on {total_rows} rows")
+    return metrics
 
-            def get_total_rows(self):
-                return self.total_rows
 
-            def get_num_features(self):
-                return self.num_features
+def load_data_for_batch_processing(dataset_path, target_column, batch_size):
+    """
+    Prepare the data path and ensure the file exists.
 
-            def batch_iterator(self, max_rows=None):
-                rows_to_process = min(self.total_rows, max_rows) if max_rows else self.total_rows
-                for i in range(0, rows_to_process, self.batch_size):
-                    end_idx = min(i + self.batch_size, rows_to_process)
-                    yield self.X[i:end_idx], self.y[i:end_idx]
+    Args:
+        dataset_path: Base path to the dataset directory
+        target_column: Name of the target column
+        batch_size: Size of batches for processing
 
-        # Create train and test batch processors
-        train_processor = InMemoryBatchProcessor(X_train, y_train, BATCH_SIZE)
-        test_processor = InMemoryBatchProcessor(X_test, y_test, BATCH_SIZE)
+    Returns:
+        tuple: (file_path, processor) where processor is a BatchProcessor instance
+    """
+    # Handle different data sources
+    if DATA_SOURCE == 'parquet':
+        file_path = os.path.join(dataset_path, PARQUET_FILE)
 
-        logger.info(
-            f"Using in-memory batch processing for MNIST with {len(X_train)} training and {len(X_test)} test examples")
-        return train_processor, test_processor
+        # Verify the file exists
+        if not os.path.exists(file_path):
+            logger.error(f"Parquet file not found: {file_path}")
+            raise FileNotFoundError(f"Parquet file not found: {file_path}")
+
+        logger.info(f"Using parquet file: {file_path}")
+
+        # Create batch processor
+        processor = BatchProcessor(file_path, target_column, batch_size)
+        processor.initialize()
+
+        # Log dataset info
+        logger.info(f"Dataset loaded: {processor.get_total_rows()} rows, {processor.get_num_features()} features")
+
+        return file_path, processor
+
+    elif DATA_SOURCE == 'csv':
+        # For future implementation
+        logger.error("CSV data source not yet implemented")
+        raise NotImplementedError("CSV data source not yet implemented")
+
+    else:
+        logger.error(f"Unknown data source: {DATA_SOURCE}")
+        raise ValueError(f"Unknown data source: {DATA_SOURCE}")
 
 
 def create_model():
-    """Create a model optimized for the current platform"""
-    model_config = optimize_model_params(platform_config)
+    """
+    Create a model suitable for the federated learning task.
 
-    if model_config['model_type'] == 'sgd':
-        from sklearn.linear_model import SGDClassifier
-        logger.info("Creating SGDClassifier model")
-        return SGDClassifier(**model_config['params'])
-    else:
-        # Default to RandomForest
-        from sklearn.ensemble import RandomForestClassifier
-        logger.info(f"Creating RandomForest with optimized parameters")
-        return RandomForestClassifier(**model_config['params'])
+    The model needs to be serializable for federated learning.
+
+    Returns:
+        model: A machine learning model
+    """
+    # For simplicity, we're using SGD Classifier which is efficient for large datasets
+    # and supports partial_fit for incremental training
+    from sklearn.linear_model import SGDClassifier
+
+    # Check if GPU acceleration is configured
+    if platform_config.get('use_gpu', False):
+        try:
+            # You would implement GPU version here
+            logger.info("GPU acceleration requested, but standard CPU model being used")
+        except Exception as e:
+            logger.warning(f"Error setting up GPU-accelerated model: {e}")
+            logger.info("Falling back to CPU-based model")
+
+    # Create SGD Classifier
+    model = SGDClassifier(loss='log_loss', penalty='l2', max_iter=100, random_state=42)
+    logger.info("Created SGD Classifier model")
+
+    return model
 
 
 def get_server_status():
-    """Get the current status of the federated learning process"""
-    try:
-        response = requests.get(f"{CENTRAL_SERVER}/status")
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.warning(f"Failed to get status: {response.status_code}, {response.text}")
-            return None
-    except Exception as e:
-        logger.error(f"Error getting server status: {e}")
-        return None
+    """
+    Check the status of the central server and get current round information.
+
+    Returns:
+        dict: Status information from the server
+    """
+    url = f"{CENTRAL_SERVER}/status"
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            status = response.json()
+            logger.info(f"Server status: round {status.get('current_round', -1)}, "
+                        f"clients: {status.get('clients_submitted', 0)}/{status.get('total_clients', 0)}")
+            return status
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Error connecting to server (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                logger.error("Max retries exceeded. Unable to connect to server.")
+                raise
 
 
 def get_platform_info():
-    """Get platform information from the server"""
+    """
+    Collect information about the running platform for diagnostics.
+
+    Returns:
+        dict: Platform information
+    """
+    # Get basic platform info
+    platform_info = {
+        'python_version': platform.python_version(),
+        'system': platform.system(),
+        'release': platform.release(),
+        'machine': platform.machine(),
+        'processor': platform.processor(),
+    }
+
+    # Add memory information
+    mem = psutil.virtual_memory()
+    platform_info['memory_total'] = mem.total / (1024 * 1024)  # MB
+    platform_info['memory_available'] = mem.available / (1024 * 1024)  # MB
+
+    # Add CPU information
+    platform_info['cpu_cores'] = psutil.cpu_count(logical=False)
+    platform_info['cpu_threads'] = psutil.cpu_count(logical=True)
+
+    # Check if GPU is available
+    platform_info['gpu_available'] = False
     try:
-        response = requests.get(f"{CENTRAL_SERVER}/platform")
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.warning(f"Failed to get platform info: {response.status_code}, {response.text}")
-            return {}
-    except Exception as e:
-        logger.error(f"Error getting platform info: {e}")
-        return {}
+        import torch
+        platform_info['gpu_available'] = torch.cuda.is_available()
+        if platform_info['gpu_available']:
+            platform_info['gpu_name'] = torch.cuda.get_device_name(0)
+            platform_info['gpu_count'] = torch.cuda.device_count()
+    except ImportError:
+        logger.info("PyTorch not available, cannot check GPU")
+
+    return platform_info
 
 
 def get_global_model():
-    """Retrieve the global model from the central server"""
-    for retry in range(MAX_RETRIES):
+    """
+    Get the latest global model from the central server.
+
+    Returns:
+        tuple: (model, round_number, success_flag)
+    """
+    url = f"{CENTRAL_SERVER}/model"
+
+    for attempt in range(MAX_RETRIES):
         try:
-            response = requests.get(f"{CENTRAL_SERVER}/model")
-            if response.status_code == 200:
-                return response.json()
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+
+            # Extract model data and round
+            data = response.json()
+            round_number = data.get('round', -1)
+
+            if 'model' in data:
+                # Deserialize the model parameters
+                model = deserialize_model(data['model'])
+                logger.info(f"Downloaded global model for round {round_number}")
+                return model, round_number, True
             else:
-                logger.warning(f"Failed to get model: {response.status_code}, {response.text}")
-        except Exception as e:
-            logger.error(f"Error retrieving global model: {e}")
+                logger.warning(f"No model data in response for round {round_number}")
+                return None, round_number, False
 
-        # Retry after delay
-        logger.info(f"Retrying in {RETRY_DELAY} seconds... (Attempt {retry + 1}/{MAX_RETRIES})")
-        time.sleep(RETRY_DELAY)
-
-    raise Exception("Failed to retrieve global model after maximum retries")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Error downloading global model (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                logger.error("Max retries exceeded. Unable to download global model.")
+                return None, -1, False
 
 
 def deserialize_model(serialized_params):
@@ -558,33 +708,6 @@ def deserialize_model(serialized_params):
             if use_gpu:
                 try:
                     import torch
-                    from sklearn.base import BaseEstimator, ClassifierMixin
-
-                    # Create a PyTorch-based SGD classifier wrapper
-                    class PyTorchSGDClassifier(BaseEstimator, ClassifierMixin):
-                        def __init__(self, loss='log', penalty='l2', alpha=0.0001,
-                                     max_iter=1000, tol=1e-3, random_state=42):
-                            self.loss = loss
-                            self.penalty = penalty
-                            self.alpha = alpha
-                            self.max_iter = max_iter
-                            self.tol = tol
-                            self.random_state = random_state
-                            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                            self.model = None
-                            self.classes_ = None
-
-                        def fit(self, X, y):
-                            # Implementation would go here
-                            pass
-
-                        def predict(self, X):
-                            # Implementation would go here
-                            pass
-
-                        def partial_fit(self, X, y, classes=None):
-                            # Implementation would go here
-                            pass
 
                     # Extract SGD-specific parameters
                     sgd_params = {
@@ -626,187 +749,111 @@ def deserialize_model(serialized_params):
         return SGDClassifier(loss='log', penalty='l2', random_state=42)
 
 
+def upload_model(model, metrics, round_number):
+    """
+    Upload the local model to the central server.
 
-def upload_model(model, sample_count, metrics):
+    Args:
+        model: The trained model
+        metrics: Training and evaluation metrics
+        round_number: The current global round number
+
+    Returns:
+        bool: Success flag
+    """
+    url = f"{CENTRAL_SERVER}/upload"
+
     try:
-        # Serialize the model to a binary string using pickle
-        model_bytes = pickle.dumps(model)
-
-        # Base64 encode the binary data to make it JSON-safe
-        model_encoded = base64.b64encode(model_bytes).decode('utf-8')
-
-        # Create the metadata payload
-        metadata = {
+        # Extract model parameters for serialization
+        model_params = {
             'client_id': CLIENT_ID,
-            'sample_count': sample_count,
-            'metrics': metrics,  # Optional: Add relevant metrics
-            'model': model_encoded  # Send the serialized model
+            'round': round_number,
+            'sample_count': metrics.get('total_rows', 0),
+            'accuracy': metrics.get('accuracy', 0),
+            'model_type': 'sgd',  # Currently only SGD is properly supported
         }
-        logger.info(f"Serialized model into metadata payload: {type(metadata)}")
 
-        # Send the metadata + serialized model as JSON
-        response = requests.post(f"{CENTRAL_SERVER}/upload", json=metadata)
+        # If SGD model, extract coefficients
+        if hasattr(model, 'coef_') and hasattr(model, 'intercept_'):
+            model_params['coef'] = model.coef_.tolist() if hasattr(model.coef_, 'tolist') else model.coef_
+            model_params['intercept'] = model.intercept_.tolist() if hasattr(model.intercept_,
+                                                                             'tolist') else model.intercept_
 
-        # Handle response
-        if response.status_code == 200:
-            logger.info(f"Successfully uploaded model metadata. Response: {response.text}")
-            return True
-        else:
-            logger.warning(f"Failed to upload: {response.status_code}, {response.text}")
-            return False
+        # Serialize model parameters
+        serialized = pickle.dumps(model_params)
 
+        # Upload to server
+        logger.info(f"Uploading model for round {round_number}, size: {len(serialized)} bytes")
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = requests.post(
+                    url,
+                    files={'model': ('model.pkl', serialized, 'application/octet-stream')},
+                    data={'client_id': CLIENT_ID, 'round': round_number},
+                    timeout=30
+                )
+                response.raise_for_status()
+                logger.info(f"Model successfully uploaded for round {round_number}")
+                return True
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Error uploading model (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY)
+                else:
+                    logger.error("Max retries exceeded. Unable to upload model.")
+                    return False
     except Exception as e:
-        logger.error(f"Error while uploading model: {str(e)}")
+        logger.error(f"Error preparing model for upload: {e}")
         return False
 
 
 def main():
-    """Main function to run the client in the federated learning process"""
-    # Log GPU status
-    if platform_config['use_gpu']:
-        gpu_count = platform_config.get('gpu_count', os.environ.get('GPU_COUNT', 1))
-        logger.info(f"GPU acceleration enabled: {gpu_count} GPUs detected")
+    """
+    Main function to run the federated learning client.
+    """
+    logger.info(f"Starting client {CLIENT_ID}")
 
-        # Check GPU devices if PyTorch is available
-        try:
-            import torch
-            logger.info(f"CUDA available: {torch.cuda.is_available()}")
-            if torch.cuda.is_available():
-                logger.info(f"GPU device: {torch.cuda.get_device_name(0)}")
-                logger.info(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024 ** 3:.2f} GB")
-        except ImportError:
-            pass
-
-    try:
-        # Load data for this client - now returns batch processors
-        if DATA_SOURCE.lower() == "parquet" and PARQUET_FILE:
-            train_processor = load_data_for_batch_processing()
-            # For parquet, we'll create a separate processor for testing
-            test_processor = BatchProcessor(PARQUET_FILE, TARGET_COLUMN, BATCH_SIZE)
-            test_processor.initialize()
-
-            # Log info about the dataset
-            logger.info(
-                f"Parquet file contains {train_processor.get_total_rows()} rows and {train_processor.get_num_features()} features")
-
-        else:
-            # For MNIST, we get separate train and test processors
-            train_processor, test_processor = load_data_for_batch_processing()
-            logger.info(
-                f"MNIST dataset: {train_processor.get_total_rows()} training rows and {test_processor.get_total_rows()} test rows")
-
-        # Create models directory for saving
-        os.makedirs(f"{DATASET_PATH}/models", exist_ok=True)
-
-        # Wait for server to be ready
-        logger.info("Waiting for server to be ready...")
-        while True:
-            status = get_server_status()
-            if status:
-                logger.info(f"Server is ready. Current round: {status['current_round']}")
-                logger.info(f"Server model type: {status.get('model_type', 'unknown')}")
-                logger.info(f"Server GPU enabled: {status.get('gpu_enabled', False)}")
-                break
-            time.sleep(5)
-
-        # Participate in federated learning rounds
-        last_round = -1
-
-        while True:
-            # Get current server status
-            status = get_server_status()
-            if not status:
-                logger.warning("Could not get server status. Retrying...")
-                time.sleep(5)
-                continue
-
-            current_round = status['current_round']
-
-            # Check if training is complete
-            if status['status'] == 'completed':
-                logger.info("Federated learning process has completed.")
-                break
-
-            # Skip if we've already done this round
-            if current_round == last_round:
-                logger.info(f"Waiting for next round... (Current: {current_round})")
-                time.sleep(5)
-                continue
-
-            logger.info(f"Starting round {current_round}")
-
-            # Get the global model parameters
-            try:
-                global_model_params = get_global_model()
-
-                # For first round, create a new model, otherwise start with global model params
-                if current_round == 0:
-                    model = create_model()
-                else:
-                    # Create model from server parameters
-                    model = deserialize_model(global_model_params)
-
-                logger.info("Initialized model for this round")
-            except Exception as e:
-                logger.error(f"Error initializing model: {e}")
-                time.sleep(5)
-                continue
-
-            # Train the model using batches
-            try:
-                # For large datasets, let's limit how much we train on
-                # This is optional and can be adjusted based on your needs
-                max_train_rows = 500000  # Limit training to 500K rows
-
-                model = train_model_in_batches(model, train_processor, max_train_rows)
-            except Exception as e:
-                logger.error(f"Error training model: {e}")
-                logger.error(traceback.format_exc())
-                continue
-
-            # Evaluate the model using batches
-            try:
-                # For evaluation, we can use a smaller subset
-                max_eval_rows = 100000  # Limit evaluation to 100K rows
-
-                metrics = evaluate_model_in_batches(model, test_processor, max_eval_rows)
-            except Exception as e:
-                logger.error(f"Error evaluating model: {e}")
-                metrics = {"accuracy": 0.0}
-
-            # Save model checkpoint
-            checkpoint_path = f"{DATASET_PATH}/models/model_{CLIENT_ID}_round_{current_round}.joblib"
-            joblib.dump(model, checkpoint_path)
-            logger.info(f"Saved checkpoint to {checkpoint_path}")
-
-            # Upload the trained model
-            try:
-                # Use the total processed rows for sample count
-                sample_count = min(train_processor.get_total_rows(), max_train_rows)
-
-                response = upload_model(model, sample_count, metrics)
-                logger.info(f"Model uploaded successfully: {response}")
-                last_round = current_round
-            except Exception as e:
-                logger.error(f"Failed to upload model: {e}")
-
-            # Small delay before next iteration
-            time.sleep(2)
-
-        # Training complete - save final model
-        final_model_path = f"{DATASET_PATH}/models/final_model_{CLIENT_ID}.joblib"
-        joblib.dump(model, final_model_path)
-        logger.info(f"Final model saved to {final_model_path}")
-
-        # Wait a bit before exiting to ensure logs are flushed
-        time.sleep(2)
-        logger.info("Client process complete")
-
-    except Exception as e:
-        logger.error(f"Unhandled exception: {str(e)}")
-        logger.error(traceback.format_exc())
+    # Check if the dataset exists
+    if not os.path.exists(DATASET_PATH):
+        logger.error(f"Dataset path not found: {DATASET_PATH}")
         sys.exit(1)
 
+    # Log platform information
+    platform_info = get_platform_info()
+    logger.info(f"Platform: {platform_info['system']} {platform_info['release']}, "
+                f"Python: {platform_info['python_version']}, "
+                f"CPU: {platform_info['cpu_cores']} cores, "
+                f"RAM: {platform_info['memory_total']:.1f} MB")
 
-if __name__ == "__main__":
-    main()
+    if platform_info.get('gpu_available'):
+        logger.info(f"GPU available: {platform_info['gpu_name']}")
+
+    # Main federated learning loop
+    current_round = -1
+    training_complete = False
+
+    while not training_complete:
+        try:
+            # Check the server status
+            status = get_server_status()
+            server_round = status.get('current_round', -1)
+
+            if server_round == -1:
+                logger.info("Server not yet initialized. Waiting...")
+                time.sleep(5)
+                continue
+
+            # Check if we need to get a new model
+            if server_round > current_round:
+                logger.info(f"New round detected: {server_round}. Downloading global model...")
+
+                # Get the global model
+                model, round_number, success = get_global_model()
+
+                if success:
+                    # Update our current round
+                    current_round = round_number
+
+                    # Load the dataset
+                    file_path,
