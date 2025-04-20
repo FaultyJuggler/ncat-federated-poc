@@ -353,7 +353,8 @@ def serialize_model(model):
         if hasattr(model, 'intercept_'):
             serialized['intercept'] = model.intercept_.tolist()
 
-        serialized['n_classes'] = model.classes_.shape[0] if hasattr(model, 'classes_') else 2
+        serialized['n_classes'] = (model.classes_.shape[0] if hasattr(model, 'classes_') and model.classes_ is not None
+                                   else 2)
         serialized['n_features'] = model.n_features_in_ if hasattr(model, 'n_features_in_') else 0
         serialized['classes'] = model.classes_.tolist() if hasattr(model, 'classes_') else None
         serialized['params'] = {
