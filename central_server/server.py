@@ -283,8 +283,16 @@ class PyTorchSGDClassifier(BaseEstimator, ClassifierMixin):
         return self
 
 # Initialize the global model
-def initialize_global_model():
+def initialize_global_model(X_sample=None, y_sample=None):
     global global_model, model_type
+
+    # If no sample data is provided, create placeholder data
+    if X_sample is None or y_sample is None:
+        X_sample = np.zeros((10, 10))  # Placeholder with 10 features
+        y_sample = np.array([0, 1])  # Binary classification placeholder
+
+    # Get unique classes from sample labels
+    unique_classes = np.unique(y_sample)
 
     # Get optimized model configuration
     model_config = optimize_model_params(platform_config)
@@ -333,54 +341,77 @@ def initialize_global_model():
 
     # Default to SGD model (preferred)
     else:
-        global_model = create_sgd_model(model_config)
-        logger.info("Initialized SGDClassifier model (preferred for federated learning)")
+        # global_model = create_sgd_model(model_config)
+        global_model = PyTorchSGDClassifier(
+            loss='log_loss',
+            penalty='l2',
+            alpha=0.0001,
+            max_iter=100,
+            tol=1e-3,
+            random_state=None,
+            learning_rate=0.01,
+            batch_size=32,
+            device='cpu'  # Or 'cuda' if available
+        )
 
+        # Call partial_fit with sample data to initialize the model
+        global_model.partial_fit(X_sample, y_sample, classes=unique_classes)
 
+        logger.info("Initialized PyTorchSGDClassifier model (preferred for federated learning)")
+    return True
 
 def serialize_model(model):
-    """Serialize model to a dictionary"""
-    # Get model type from environment or default to 'sgd'
-    model_type = os.environ.get('MODEL_TYPE', 'sgd')
+    """
+    Serialize a model (scikit-learn or PyTorchSGDClassifier) to a JSON-serializable format.
+    """
+    if model is None:
+        return {'model_present': False}
 
-    serialized = {}
-    serialized['model_type'] = model_type
+    serialized = {'model_present': True}
 
-    if model_type == 'sgd':
-        # For SGD Classifier
-        if hasattr(model, 'coef_'):
-            serialized['coef'] = model.coef_.tolist()
-        if hasattr(model, 'intercept_'):
-            serialized['intercept'] = model.intercept_.tolist()
+    # Add model type information
+    serialized['model_type'] = model.__class__.__name__
 
-        serialized['n_classes'] = (model.classes_.shape[0] if hasattr(model, 'classes_') and model.classes_ is not None
-                                   else 2)
-        serialized['n_features'] = model.n_features_in_ if hasattr(model, 'n_features_in_') else 0
-        serialized['classes'] = model.classes_.tolist() if hasattr(model, 'classes_') else None
-        serialized['params'] = {
-            'loss': getattr(model, 'loss', 'log_loss'),
-            'penalty': getattr(model, 'penalty', 'l2'),
-            'alpha': getattr(model, 'alpha', 0.0001),
-            'max_iter': getattr(model, 'max_iter', 5),
-            'tol': getattr(model, 'tol', 0.001),
-            'random_state': getattr(model, 'random_state', 42),
-            'warm_start': getattr(model, 'warm_start', True)
-        }
+    # Add shape information if available
+    if hasattr(model, 'n_features_in_'):
+        serialized['n_features'] = int(model.n_features_in_)
+
+    # Safely handle classes attribute - check both existence and non-None value
+    if hasattr(model, 'classes_') and model.classes_ is not None:
+        serialized['classes'] = model.classes_.tolist()
     else:
-        # RandomForest serialization (original code)
-        serialized['n_classes'] = model.n_classes_ if hasattr(model, 'n_classes_') else 2
-        serialized['n_features'] = model.n_features_in_ if hasattr(model, 'n_features_in_') else 0
-        serialized['classes'] = model.classes_.tolist() if hasattr(model, 'classes_') else None
-        serialized['params'] = {
-            'n_estimators': getattr(model, 'n_estimators', 100),
-            'criterion': getattr(model, 'criterion', 'gini'),
-            'max_depth': getattr(model, 'max_depth', None),
-            'min_samples_split': getattr(model, 'min_samples_split', 2),
-            'min_samples_leaf': getattr(model, 'min_samples_leaf', 1),
-            'bootstrap': getattr(model, 'bootstrap', True)
-        }
+        serialized['classes'] = None
+
+    # Add sklearn-specific attributes
+    if hasattr(model, 'coef_') and model.coef_ is not None:
+        serialized['coef'] = model.coef_.tolist()
+    if hasattr(model, 'intercept_') and model.intercept_ is not None:
+        serialized['intercept'] = model.intercept_.tolist()
+
+    # Special handling for PyTorchSGDClassifier
+    if model.__class__.__name__ == 'PyTorchSGDClassifier':
+        # Serialize hyperparameters
+        if hasattr(model, 'get_params'):
+            serialized['params'] = {k: str(v) if not isinstance(v, (int, float, bool, str, type(None))) else v
+                                    for k, v in model.get_params().items()}
+
+        # Serialize the PyTorch model state
+        if hasattr(model, 'model') and model.model is not None:
+            # Convert PyTorch model state to bytes and then base64 string
+            try:
+                state_buffer = io.BytesIO()
+                torch.save(model.model.state_dict(), state_buffer)
+                serialized['state_dict'] = base64.b64encode(state_buffer.getvalue()).decode('utf-8')
+            except Exception as e:
+                logger.error(f"Failed to serialize PyTorch model state: {e}")
+
+    # For sklearn models, add other parameters
+    elif hasattr(model, 'get_params'):
+        serialized['params'] = {k: str(v) if not isinstance(v, (int, float, bool, str, type(None))) else v
+                                for k, v in model.get_params().items()}
 
     return serialized
+
 
 
 def deserialize_model(serialized_params):
