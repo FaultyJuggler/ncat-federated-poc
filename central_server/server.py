@@ -291,7 +291,7 @@ def initialize_global_model(X_sample=None, y_sample=None):
 
     # If no sample data is provided, create placeholder data
     if X_sample is None or y_sample is None:
-        X_sample = np.zeros((10, 10))  # Placeholder with 10 features
+        X_sample = np.zeros((2, 2))  # Placeholder with 2 features
         y_sample = np.array([0, 1])  # Binary classification placeholder
 
     # Get unique classes from sample labels
@@ -356,10 +356,22 @@ def initialize_global_model(X_sample=None, y_sample=None):
             batch_size=32
         )
 
-        # Call partial_fit with sample data to initialize the model
-        global_model.partial_fit(X_sample, y_sample, classes=unique_classes)
+        # Ensure the number of inputs/outputs match before calling partial_fit
+        # First log the shapes to help with debugging
+        logger.info(f"X_sample shape: {X_sample.shape}, y_sample shape: {y_sample.shape}, classes: {unique_classes}")
 
-        logger.info("Initialized PyTorchSGDClassifier model (preferred for federated learning)")
+        try:
+            # Call partial_fit with sample data to initialize the model
+            global_model.partial_fit(X_sample, y_sample, classes=unique_classes)
+            logger.info("Successfully initialized PyTorchSGDClassifier model")
+        except Exception as e:
+            logger.error(f"Error initializing PyTorchSGDClassifier: {e}")
+            # Fallback to sklearn SGDClassifier
+            global_model = create_sgd_model(model_config)
+            global_model.partial_fit(X_sample, y_sample, classes=unique_classes)
+            logger.info("Falling back to sklearn SGDClassifier")
+
+    logger.info("Initialized PyTorchSGDClassifier model (preferred for federated learning)")
     return True
 
 def serialize_model(model):
