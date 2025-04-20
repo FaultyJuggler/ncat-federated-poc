@@ -350,8 +350,7 @@ def initialize_global_model(X_sample=None, y_sample=None):
             tol=1e-3,
             random_state=None,
             learning_rate=0.01,
-            batch_size=32,
-            device='cpu'  # Or 'cuda' if available
+            batch_size=32
         )
 
         # Call partial_fit with sample data to initialize the model
