@@ -73,6 +73,9 @@ class PyTorchSGDClassifier(BaseEstimator, ClassifierMixin):
         self.learning_rate = learning_rate
         self.batch_size = batch_size
 
+        if self.random_state is not None:
+            torch.manual_seed(self.random_state)
+
         # Set GPU device if available
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         logger.info(f"PyTorch using device: {self.device}")
@@ -348,7 +351,7 @@ def initialize_global_model(X_sample=None, y_sample=None):
             alpha=0.0001,
             max_iter=100,
             tol=1e-3,
-            random_state=None,
+            random_state=42,
             learning_rate=0.01,
             batch_size=32
         )
