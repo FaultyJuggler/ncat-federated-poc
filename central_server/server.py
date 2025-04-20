@@ -291,7 +291,7 @@ def initialize_global_model(X_sample=None, y_sample=None):
 
     # If no sample data is provided, create placeholder data
     if X_sample is None or y_sample is None:
-        X_sample = np.zeros((2, 2))  # Placeholder with 2 features
+        X_sample = np.zeros((2, 9))  # 2 samples, 10 features
         y_sample = np.array([0, 1])  # Binary classification placeholder
 
     # Get unique classes from sample labels
