@@ -732,6 +732,19 @@ def get_metrics():
     """Return training metrics for all rounds"""
     return jsonify(round_metrics)
 
+@app.route('/status', methods=['GET'])
+def get_status():
+    return jsonify({
+        "status": "running" if not is_training_complete else "complete",
+        "current_round": current_round,
+        "total_rounds": total_rounds,
+        "clients_submitted": len(client_models),
+        "min_clients_required": min_clients,
+        "clients": list(client_models.keys()),
+        "is_training_complete": is_training_complete,
+        "server_time": time.time()
+    })
+
 
 @app.route('/platform', methods=['GET'])
 def get_platform_info():
