@@ -664,6 +664,8 @@ def get_model():
 
 @app.route('/upload', methods=['POST'])
 def upload_model():
+    global current_round, client_models, is_training_complete
+
     if request.content_type and 'application/json' in request.content_type:
         data = request.json
         client_id = data['client_id']
@@ -685,6 +687,36 @@ def upload_model():
                 'model': model,  # Store the deserialized model (optional)
                 'timestamp': time.time()
             }
+
+        # Check if all expected clients have submitted their models
+        logger.info(f"Received model from client {client_id}. Models received: {len(client_models)}/{min_clients}")
+
+        if len(client_models) >= min_clients:
+            try:
+                # Aggregate models using federated averaging
+                logger.info(f"All {min_clients} clients submitted models. Performing federated averaging...")
+                federated_averaging()
+
+                # Store round metrics
+                round_metrics[current_round] = {
+                    'client_metrics': {client_id: client_models[client_id]['metrics'] for client_id in
+                                       client_models}
+                }
+
+                # Increment round counter
+                current_round += 1
+                logger.info(f"Advanced to round {current_round}/{total_rounds}")
+
+                # Clear client models for next round
+                client_models.clear()
+
+                # Check if training is complete
+                if current_round >= total_rounds:
+                    is_training_complete = True
+                    logger.info("Training complete!")
+            except Exception as e:
+                logger.error(f"Failed to advance round: {str(e)}")
+                return jsonify({"status": "error", "message": f"Failed to advance round: {str(e)}"}), 500
 
         return jsonify({
             "status": "success",
