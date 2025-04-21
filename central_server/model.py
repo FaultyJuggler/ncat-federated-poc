@@ -820,7 +820,6 @@ def merge_models(models, model_types, sample_counts):
         raise ValueError(f"Unsupported model type for merging: {model_type}")
 
 
-# In model.py
 def federated_averaging(models, sample_counts, model_type=None):
     """
     Perform weighted federated averaging on client models.
@@ -831,98 +830,128 @@ def federated_averaging(models, sample_counts, model_type=None):
         model_type: String indicating the type of model ('pytorch_sgd', 'sgd', etc.)
 
     Returns:
-        True if successful, False otherwise
+        Dictionary of averaged model parameters if successful, False otherwise
     """
     try:
         if not models:
             logger.warning("No models to average")
             return False
 
-        # Get reference model and check what keys it contains
+        # Get reference model and examine its structure
         reference_model = next(iter(models.values()))
-        logger.debug(f"Model keys: {list(reference_model.keys())}")
+        logger.info(f"Model type: {type(reference_model)}")
+        logger.info(
+            f"Model keys: {list(reference_model.keys()) if isinstance(reference_model, dict) else 'Not a dictionary'}")
+
+        # If it's a nested dictionary, print inner keys too
+        if isinstance(reference_model, dict):
+            for key, value in reference_model.items():
+                if isinstance(value, dict):
+                    logger.info(f"Inner keys for '{key}': {list(value.keys())}")
+                else:
+                    logger.info(f"Value type for '{key}': {type(value)}")
+                    if hasattr(value, 'shape'):
+                        logger.info(f"Shape for '{key}': {value.shape}")
 
         total_samples = sum(sample_counts.values())
         if total_samples <= 0:
             logger.warning("Total sample count is zero or negative")
             return False
 
-        # Determine model type if not provided
-        if model_type is None:
-            # Try to infer from dictionary structure
-            if isinstance(reference_model, dict):
-                if 'state_dict' in reference_model:
-                    model_type = 'pytorch_sgd'
-                elif 'coef_' in reference_model:
-                    model_type = 'sgd'
-                else:
-                    logger.error(f"Unable to determine model type from dictionary keys: {list(reference_model.keys())}")
-                    return False
-            else:
-                logger.error(f"Unable to determine model type for object of type: {type(reference_model)}")
-                return False
+        # Handle simple sklearn-like models directly
+        if isinstance(reference_model, dict) and 'coef_' in reference_model and 'intercept_' in reference_model:
+            # Initialize with zeros
+            coef = np.zeros_like(reference_model['coef_'])
+            intercept = np.zeros_like(reference_model['intercept_'])
 
-        # Handle different model types
-        if model_type == 'pytorch_sgd':
-            # Model is likely a PyTorch model dictionary
+            # Weighted average
+            for client_id, model_dict in models.items():
+                weight = sample_counts[client_id] / total_samples
+                coef += model_dict['coef_'] * weight
+                intercept += model_dict['intercept_'] * weight
+
+            logger.info("Successfully averaged sklearn-like model parameters")
+            return {'coef_': coef, 'intercept_': intercept}
+
+        # For PyTorch models, try different possible structures
+        if isinstance(reference_model, dict):
+            # Check for various possible structures
             if 'state_dict' in reference_model:
-                # Get state dict structure from first model
+                # Standard PyTorch state_dict structure
+                # [... previous PyTorch averaging code ...]
                 averaged_state = {}
                 for key, value in reference_model['state_dict'].items():
-                    # Initialize with zeros of the same shape
-                    if isinstance(value, np.ndarray):
-                        averaged_state[key] = np.zeros_like(value)
-                    else:
-                        # Convert to numpy if it's not already
-                        averaged_state[key] = np.zeros_like(np.array(value))
+                    averaged_state[key] = np.zeros_like(np.array(value))
 
-                # Weighted average of parameters
                 for client_id, model_dict in models.items():
                     weight = sample_counts[client_id] / total_samples
-                    client_state = model_dict['state_dict']
-
                     for key in averaged_state:
-                        if isinstance(client_state[key], np.ndarray):
-                            averaged_state[key] += client_state[key] * weight
-                        else:
-                            # Convert to numpy if needed
-                            averaged_state[key] += np.array(client_state[key]) * weight
+                        averaged_state[key] += np.array(model_dict['state_dict'][key]) * weight
 
-                # Update the global model
-                from copy import deepcopy
-
-                # For now, just return the averaged state
-                # The server should handle updating the global model
+                logger.info("Successfully averaged PyTorch model with state_dict")
                 return {'state_dict': averaged_state}
 
-            else:
-                logger.error("PyTorch model dictionary doesn't contain expected 'state_dict' key")
-                return False
+            # Check if the dictionary itself is the state dict (no nesting)
+            elif any(key.endswith('.weight') or key.endswith('.bias') for key in reference_model.keys()):
+                # The dictionary itself might be the state dict
+                averaged_state = {}
+                for key, value in reference_model.items():
+                    averaged_state[key] = np.zeros_like(np.array(value))
 
-        elif model_type == 'sgd' or 'coef_' in reference_model:
-            # Model is likely a sklearn-type model dictionary
-            if 'coef_' in reference_model and 'intercept_' in reference_model:
-                # Initialize with zeros
-                coef = np.zeros_like(reference_model['coef_'])
-                intercept = np.zeros_like(reference_model['intercept_'])
-
-                # Weighted average
                 for client_id, model_dict in models.items():
                     weight = sample_counts[client_id] / total_samples
-                    coef += model_dict['coef_'] * weight
-                    intercept += model_dict['intercept_'] * weight
+                    for key in averaged_state:
+                        averaged_state[key] += np.array(model_dict[key]) * weight
 
-                # Return averaged model parameters
-                return {'coef_': coef, 'intercept_': intercept}
+                logger.info("Successfully averaged PyTorch model parameters (direct dictionary)")
+                return averaged_state
 
-            else:
-                logger.error("SGD model dictionary doesn't contain expected 'coef_' and 'intercept_' keys")
-                return False
+            # Custom structure handling - for serialized PyTorchSGDClassifier
+            elif 'model' in reference_model:
+                logger.info("Detected nested model structure")
+
+                if isinstance(reference_model['model'], dict):
+                    inner_model = reference_model['model']
+
+                    # Check inner model structure
+                    logger.info(f"Inner model keys: {list(inner_model.keys())}")
+
+                    if 'state_dict' in inner_model:
+                        # Handle nested state_dict
+                        averaged_state = {}
+                        for key, value in inner_model['state_dict'].items():
+                            averaged_state[key] = np.zeros_like(np.array(value))
+
+                        for client_id, model_dict in models.items():
+                            weight = sample_counts[client_id] / total_samples
+                            inner = model_dict['model']['state_dict']
+                            for key in averaged_state:
+                                averaged_state[key] += np.array(inner[key]) * weight
+
+                        logger.info("Successfully averaged nested PyTorch model")
+                        return {'model': {'state_dict': averaged_state}}
+
+                    # Another possibility - direct parameters in the inner model
+                    elif any(key.endswith('.weight') or key.endswith('.bias') for key in inner_model.keys()):
+                        averaged_inner = {}
+                        for key, value in inner_model.items():
+                            averaged_inner[key] = np.zeros_like(np.array(value))
+
+                        for client_id, model_dict in models.items():
+                            weight = sample_counts[client_id] / total_samples
+                            inner = model_dict['model']
+                            for key in averaged_inner:
+                                averaged_inner[key] += np.array(inner[key]) * weight
+
+                        logger.info("Successfully averaged nested PyTorch parameters")
+                        return {'model': averaged_inner}
+
+            # If we reach here, no recognized structure was found
+            logger.error(f"Unrecognized model dictionary structure with keys: {list(reference_model.keys())}")
+            return False
 
         else:
-            # Add debugging to understand what we're dealing with
-            logger.error(f"Unsupported model type: {model_type}")
-            logger.error(f"Model dictionary keys: {list(reference_model.keys())}")
+            logger.error(f"Unsupported model type: {type(reference_model)}")
             return False
 
     except Exception as e:
@@ -930,6 +959,7 @@ def federated_averaging(models, sample_counts, model_type=None):
         import traceback
         logger.error(traceback.format_exc())
         return False
+
 
 def evaluate_model(model, X_test, y_test):
     """
