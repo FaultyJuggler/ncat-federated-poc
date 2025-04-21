@@ -838,59 +838,97 @@ def federated_averaging(models, sample_counts, model_type=None):
             logger.warning("No models to average")
             return False
 
-        # Extract the actual PyTorchSGDClassifier models from the dictionaries
-        model_objects = {}
+        # Log detailed information about each client's submission
         for client_id, model_dict in models.items():
-            if 'model' in model_dict and isinstance(model_dict['model'], PyTorchSGDClassifier):
-                model_objects[client_id] = model_dict['model']
+            logger.info(f"Client {client_id} submission type: {type(model_dict)}")
+            if isinstance(model_dict, dict):
+                logger.info(f"Client {client_id} keys: {list(model_dict.keys())}")
+                if 'model' in model_dict:
+                    model_obj = model_dict['model']
+                    logger.info(f"Client {client_id} model type: {type(model_obj)}")
+                    # Log model's attributes
+                    if hasattr(model_obj, '__dict__'):
+                        logger.info(f"Model attributes: {list(model_obj.__dict__.keys())}")
+                    # Check if it has the expected 'model' attribute
+                    if hasattr(model_obj, 'model'):
+                        logger.info(f"Internal model type: {type(model_obj.model)}")
+                    else:
+                        logger.warning(f"Model doesn't have 'model' attribute")
             else:
-                logger.error(f"Unexpected model structure for client {client_id}")
-                return False
+                logger.warning(f"Client {client_id} didn't submit a dictionary")
 
-        # Now we have the actual model objects, we can average them
-        reference_model = next(iter(model_objects.values()))
+        # Extract models that can be averaged
+        valid_models = {}
+        valid_sample_counts = {}
 
-        # Get the internal PyTorch model's state dict
+        for client_id, model_dict in models.items():
+            try:
+                # Handle different possible structures
+                if isinstance(model_dict, dict) and 'model' in model_dict:
+                    model_obj = model_dict['model']
+                    if hasattr(model_obj, 'model') and hasattr(model_obj.model, 'state_dict'):
+                        valid_models[client_id] = model_obj
+                        valid_sample_counts[client_id] = sample_counts.get(client_id, 1)
+                    else:
+                        logger.warning(f"Client {client_id} model doesn't have expected structure")
+                elif hasattr(model_dict, 'model') and hasattr(model_dict.model, 'state_dict'):
+                    # The model was submitted directly without a dictionary wrapper
+                    valid_models[client_id] = model_dict
+                    valid_sample_counts[client_id] = sample_counts.get(client_id, 1)
+                else:
+                    logger.warning(f"Client {client_id} submission can't be used for averaging")
+            except Exception as e:
+                logger.error(f"Error processing client {client_id} model: {str(e)}")
+
+        logger.info(f"Found {len(valid_models)} valid models for averaging")
+
+        if len(valid_models) < 1:
+            logger.error("No valid models for averaging")
+            return False
+
+        # Now average the valid models
+        import torch
+        import numpy as np
+
+        # Get reference model
+        reference_model = next(iter(valid_models.values()))
         ref_state_dict = reference_model.model.state_dict()
 
-        # Initialize the averaged state dict with zeros
-        import torch
+        # Initialize averaged state
         averaged_state = {}
         for key, value in ref_state_dict.items():
-            # Move tensor to CPU before converting to numpy
             cpu_value = value.cpu()
             averaged_state[key] = np.zeros_like(cpu_value.numpy())
 
-        # Weighted average of parameters
-        total_samples = sum(sample_counts.values())
-        for client_id, model in model_objects.items():
-            weight = sample_counts[client_id] / total_samples
+        # Weighted average
+        total_samples = sum(valid_sample_counts.values())
+        for client_id, model in valid_models.items():
+            weight = valid_sample_counts[client_id] / total_samples
             state_dict = model.model.state_dict()
 
             for key in averaged_state:
-                param = state_dict[key].cpu()  # Move to CPU
+                param = state_dict[key].cpu()
                 averaged_state[key] += param.numpy() * weight
 
-        # Create a new model with the averaged parameters
+        # Create new model with averaged parameters
         import copy
-
         averaged_model = copy.deepcopy(reference_model)
 
-        # Convert numpy arrays back to tensors and move to original device
+        # Convert back to tensors
         device = next(averaged_model.model.parameters()).device
         torch_state_dict = {}
         for key, value in averaged_state.items():
             torch_state_dict[key] = torch.tensor(value, device=device)
 
-        # Load the averaged parameters into the internal model
+        # Load state dict
         averaged_model.model.load_state_dict(torch_state_dict)
 
-        logger.info("Successfully averaged PyTorchSGDClassifier models")
+        logger.info("Successfully averaged models")
 
-        # Package the result similar to the input dictionaries
+        # Package result
         result = {
             'model': averaged_model,
-            'sample_count': sum(sample_counts.values()),
+            'sample_count': total_samples,
             'metrics': {},
             'timestamp': time.time()
         }
