@@ -868,7 +868,7 @@ def federated_averaging(models, sample_counts, model_type=None):
                 averaged_state = {}
                 for key, value in ref_state_dict.items():
                     if hasattr(value, 'numpy'):
-                        averaged_state[key] = np.zeros_like(value.numpy())
+                        averaged_state[key] = np.zeros_like(value.cpu().numpy())
                     else:
                         averaged_state[key] = np.zeros_like(np.array(value))
 
