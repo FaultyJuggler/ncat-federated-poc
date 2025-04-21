@@ -134,12 +134,21 @@ def detect_platform():
 # SGD classifier
 def optimize_model_params(config):
     """Return optimized model parameters based on the platform configuration."""
+
+    # Determine model type based on available libraries
+    try:
+        import torch
+        has_torch = True
+    except ImportError:
+        has_torch = False
+
+
     # Use SGDClassifier instead of XGBoost
     from sklearn.linear_model import SGDClassifier
     logger.info("Using memory-efficient SGDClassifier for federated learning")
-    return {
-        'model_type': 'sgd',
-        'params': {
+
+    # Generate params for sklearn SGD
+    params = {
             'loss': 'log_loss',  # For classification
             'penalty': 'l2',
             'alpha': 0.0001,
@@ -148,7 +157,15 @@ def optimize_model_params(config):
             'random_state': 42,
             'warm_start': True  # Important for incremental learning
         }
-    }
+
+    # Use PyTorch if available
+    if has_torch:
+        # Remove sklearn-specific params
+        if 'warm_start' in params['params']:
+            del params['params']["warm_start"]
+
+    return params
+
 
 def optimize_rf_params(config):
     """
