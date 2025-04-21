@@ -571,7 +571,10 @@ def upload_model():
             try:
                 # Aggregate models using federated averaging
                 logger.info(f"All {min_clients} clients submitted models. Performing federated averaging...")
-                if federated_averaging():
+                # Create equal weights for all clients
+                client_sample_counts = {client_id: 1 for client_id in client_models.keys()}
+
+                if federated_averaging(client_models, client_sample_counts):
                     # Create metrics for this round
                     metrics = {
                         'participating_clients': len(client_models),
