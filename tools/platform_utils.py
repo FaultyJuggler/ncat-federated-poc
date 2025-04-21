@@ -138,7 +138,7 @@ def optimize_model_params(config):
     from sklearn.linear_model import SGDClassifier
     logger.info("Using memory-efficient SGDClassifier for federated learning")
     return {
-        'model_type': 'sgd',
+        'model_type': 'pytorch_sgd',
         'params': {
             'loss': 'log_loss',  # For classification
             'penalty': 'l2',

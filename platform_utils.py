@@ -149,7 +149,7 @@ def optimize_model_params(config):
 
     # Generate params for sklearn SGD
     params = {
-        'model_type': 'sgd',
+        'model_type': 'pytorch_sgd',
         'params': {
             'loss': 'log_loss',  # For classification
             'penalty': 'l2',

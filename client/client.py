@@ -554,10 +554,10 @@ def deserialize_model(serialized_params):
     logger.info("Deserializing model...")
 
     # Get model type, default to 'sgd'
-    model_type = serialized_params.get('model_type', 'sgd')
+    model_type = serialized_params.get('model_type', 'pytorch_sgd')
     use_gpu = serialized_params.get('use_gpu', platform_config.get('use_gpu', False))
 
-    if model_type == 'sgd':
+    if model_type == 'pytorch_sgd':
         try:
             # Try to use PyTorch if GPU acceleration is requested
             if use_gpu:
