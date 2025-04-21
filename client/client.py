@@ -10,6 +10,7 @@ import pandas as pd
 import sys
 import traceback
 import gc
+from model import PyTorchSGDClassifier
 
 
 # Add paths for imports

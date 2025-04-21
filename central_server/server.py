@@ -10,7 +10,7 @@ import base64
 from flask import Flask, jsonify, request, Response
 import sys
 
-from central_server.model import PyTorchSGDClassifier
+from model import PyTorchSGDClassifier
 
 # Add paths for imports
 sys.path.append('/')  # Add root directory to path for Docker container
