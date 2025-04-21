@@ -1,6 +1,6 @@
-# Federated Learning with RandomForest
+# Federated Learning with Stochastic Gradient Descent
 
-This project implements a federated learning system using RandomForest classifiers. The system consists of a central server and multiple client nodes that train on local data and collaborate to build a global model without sharing raw data.
+This project implements a federated learning system using Stochastic Gradient Descent Classifiers. The system consists of a central server and multiple client nodes that train on local data and collaborate to build a global model without sharing raw data.
 
 ## Overview
 
@@ -85,12 +85,12 @@ client1:
 
 1. Start the federated learning system:
    ```bash
-   docker compose up --build
+   sudo docker compose up --build
    ```
 
 2. Monitor the training process through logs:
    ```bash
-   docker compose logs -f
+   sudo docker compose logs -f
    ```
 
 3. Visualize training metrics (from host machine):

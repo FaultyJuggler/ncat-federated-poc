@@ -1,19 +1,16 @@
 import os
-import json
 import time
 import logging
 import requests
 import numpy as np
 import joblib
-import json
 import pickle  # For in-memory model serialization
 import base64
 import pandas as pd
 import sys
 import traceback
 import gc
-import torch
-from sklearn.base import BaseEstimator, ClassifierMixin
+
 
 # Add paths for imports
 sys.path.append('/')  # Add root directory to path for Docker container
@@ -57,31 +54,6 @@ logger.info(f"GPU enabled: {platform_config['use_gpu']}")
 MAX_RETRIES = 5
 RETRY_DELAY = 10  # seconds
 
-# Create a PyTorch-based SGD classifier wrapper
-class PyTorchSGDClassifier(BaseEstimator, ClassifierMixin):
-    def __init__(self, loss='log', penalty='l2', alpha=0.0001,
-                 max_iter=1000, tol=1e-3, random_state=42):
-        self.loss = loss
-        self.penalty = penalty
-        self.alpha = alpha
-        self.max_iter = max_iter
-        self.tol = tol
-        self.random_state = random_state
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = None
-        self.classes_ = None
-
-    def fit(self, X, y):
-        # Implementation would go here
-        pass
-
-    def predict(self, X):
-        # Implementation would go here
-        pass
-
-    def partial_fit(self, X, y, classes=None):
-        # Implementation would go here
-        pass
 
 def log_memory_usage():
     """Log current memory usage"""
@@ -511,14 +483,19 @@ def create_model():
     model_config = optimize_model_params(platform_config)
 
     if model_config['model_type'] == 'sgd':
-        from sklearn.linear_model import SGDClassifier
-        logger.info("Creating SGDClassifier model")
-        return SGDClassifier(**model_config['params'])
+        logger.info("Creating PyTorchSGDClassifier model")
+        from model import PyTorchSGDClassifier
+        return PyTorchSGDClassifier(**model_config['params'])
+    elif model_config['model_type'] == 'pytorch_sgd':
+        logger.info("Creating PyTorchSGDClassifier model")
+        from model import PyTorchSGDClassifier
+        return PyTorchSGDClassifier(**model_config['params'])
     else:
         # Default to RandomForest
         from sklearn.ensemble import RandomForestClassifier
         logger.info(f"Creating RandomForest with optimized parameters")
         return RandomForestClassifier(**model_config['params'])
+
 
 
 def get_server_status():
