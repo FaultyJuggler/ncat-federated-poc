@@ -574,40 +574,10 @@ def upload_model():
                 # Create equal weights for all clients
                 client_sample_counts = {client_id: 1 for client_id in client_models.keys()}
 
-                averaged_model = federated_averaging(client_models, client_sample_counts, model_type)
-                if averaged_model:
-                    # Update the global model with the averaged parameters
-                    if isinstance(averaged_model, dict):
-                        if 'coef_' in averaged_model and 'intercept_' in averaged_model:
-                            # For sklearn-like models
-                            global_model.coef_ = averaged_model['coef_']
-                            global_model.intercept_ = averaged_model['intercept_']
-
-                        elif 'state_dict' in averaged_model:
-                            # For standard PyTorch models
-                            global_model.load_state_dict(averaged_model['state_dict'])
-
-                        elif 'model' in averaged_model and 'state_dict' in averaged_model['model']:
-                            # For nested PyTorch models
-                            global_model.model.load_state_dict(averaged_model['model']['state_dict'])
-
-                        elif 'model' in averaged_model:
-                            # For custom nested structures
-                            for key, value in averaged_model['model'].items():
-                                if hasattr(global_model.model, key):
-                                    setattr(global_model.model, key, value)
-
-                        elif any(key.endswith('.weight') or key.endswith('.bias') for key in averaged_model.keys()):
-                            # For direct PyTorch parameters
-                            global_model.load_state_dict(averaged_model)
-
-                        else:
-                            logger.error(
-                                f"Don't know how to apply averaged model with keys: {list(averaged_model.keys())}")
-                            return False
-                    else:
-                        logger.error(f"Unexpected averaged model type: {type(averaged_model)}")
-                        return False
+                averaged_result = federated_averaging(client_models, client_sample_counts, model_type)
+                if averaged_result and 'model' in averaged_result:
+                    # replace the global model with the averaged model
+                    global_model = averaged_result['model']
 
                     # Create metrics for this round
                     metrics = {

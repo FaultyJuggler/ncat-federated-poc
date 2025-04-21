@@ -1,4 +1,5 @@
 # model.py
+import time
 import numpy as np
 import base64
 import logging
@@ -830,128 +831,86 @@ def federated_averaging(models, sample_counts, model_type=None):
         model_type: String indicating the type of model ('pytorch_sgd', 'sgd', etc.)
 
     Returns:
-        Dictionary of averaged model parameters if successful, False otherwise
+        Averaged model if successful, False otherwise
     """
     try:
         if not models:
             logger.warning("No models to average")
             return False
 
-        # Get reference model and examine its structure
-        reference_model = next(iter(models.values()))
-        logger.info(f"Model type: {type(reference_model)}")
-        logger.info(
-            f"Model keys: {list(reference_model.keys()) if isinstance(reference_model, dict) else 'Not a dictionary'}")
+        # Get reference model
+        reference_dict = next(iter(models.values()))
 
-        # If it's a nested dictionary, print inner keys too
-        if isinstance(reference_model, dict):
-            for key, value in reference_model.items():
-                if isinstance(value, dict):
-                    logger.info(f"Inner keys for '{key}': {list(value.keys())}")
-                else:
-                    logger.info(f"Value type for '{key}': {type(value)}")
-                    if hasattr(value, 'shape'):
-                        logger.info(f"Shape for '{key}': {value.shape}")
+        # Extract the actual PyTorchSGDClassifier models from the dictionaries
+        model_objects = {}
+        for client_id, model_dict in models.items():
+            if 'model' in model_dict and isinstance(model_dict['model'], PyTorchSGDClassifier):
+                model_objects[client_id] = model_dict['model']
+            else:
+                logger.error(f"Unexpected model structure for client {client_id}")
+                return False
 
-        total_samples = sum(sample_counts.values())
-        if total_samples <= 0:
-            logger.warning("Total sample count is zero or negative")
-            return False
+        # Now we have the actual model objects, we can average them
+        # First, let's get the weights from one model to determine the structure
+        reference_model = next(iter(model_objects.values()))
 
-        # Handle simple sklearn-like models directly
-        if isinstance(reference_model, dict) and 'coef_' in reference_model and 'intercept_' in reference_model:
-            # Initialize with zeros
-            coef = np.zeros_like(reference_model['coef_'])
-            intercept = np.zeros_like(reference_model['intercept_'])
+        # Check if the model has a state_dict method (standard PyTorch models)
+        if hasattr(reference_model, 'state_dict'):
+            try:
+                # Get state dict from reference model
+                ref_state_dict = reference_model.state_dict()
 
-            # Weighted average
-            for client_id, model_dict in models.items():
-                weight = sample_counts[client_id] / total_samples
-                coef += model_dict['coef_'] * weight
-                intercept += model_dict['intercept_'] * weight
-
-            logger.info("Successfully averaged sklearn-like model parameters")
-            return {'coef_': coef, 'intercept_': intercept}
-
-        # For PyTorch models, try different possible structures
-        if isinstance(reference_model, dict):
-            # Check for various possible structures
-            if 'state_dict' in reference_model:
-                # Standard PyTorch state_dict structure
-                # [... previous PyTorch averaging code ...]
+                # Initialize the averaged state dict with zeros
                 averaged_state = {}
-                for key, value in reference_model['state_dict'].items():
-                    averaged_state[key] = np.zeros_like(np.array(value))
+                for key, value in ref_state_dict.items():
+                    # Convert PyTorch tensor to numpy for averaging
+                    if hasattr(value, 'numpy'):
+                        averaged_state[key] = np.zeros_like(value.numpy())
+                    else:
+                        averaged_state[key] = np.zeros_like(np.array(value))
 
-                for client_id, model_dict in models.items():
+                # Weighted average of parameters
+                total_samples = sum(sample_counts.values())
+                for client_id, model in model_objects.items():
                     weight = sample_counts[client_id] / total_samples
+                    state_dict = model.state_dict()
+
                     for key in averaged_state:
-                        averaged_state[key] += np.array(model_dict['state_dict'][key]) * weight
+                        param = state_dict[key]
+                        if hasattr(param, 'numpy'):
+                            averaged_state[key] += param.numpy() * weight
+                        else:
+                            averaged_state[key] += np.array(param) * weight
 
-                logger.info("Successfully averaged PyTorch model with state_dict")
-                return {'state_dict': averaged_state}
+                # Create a new model with the averaged parameters
+                import copy
+                averaged_model = copy.deepcopy(reference_model)
 
-            # Check if the dictionary itself is the state dict (no nesting)
-            elif any(key.endswith('.weight') or key.endswith('.bias') for key in reference_model.keys()):
-                # The dictionary itself might be the state dict
-                averaged_state = {}
-                for key, value in reference_model.items():
-                    averaged_state[key] = np.zeros_like(np.array(value))
+                # Convert numpy arrays back to tensors if needed and load into model
+                import torch
+                torch_state_dict = {}
+                for key, value in averaged_state.items():
+                    torch_state_dict[key] = torch.tensor(value)
 
-                for client_id, model_dict in models.items():
-                    weight = sample_counts[client_id] / total_samples
-                    for key in averaged_state:
-                        averaged_state[key] += np.array(model_dict[key]) * weight
+                averaged_model.load_state_dict(torch_state_dict)
+                logger.info("Successfully averaged PyTorch models")
 
-                logger.info("Successfully averaged PyTorch model parameters (direct dictionary)")
-                return averaged_state
+                # Package the result similar to the input dictionaries
+                result = {
+                    'model': averaged_model,
+                    'sample_count': sum(sample_counts.values()),
+                    'metrics': {},  # Metrics should be recalculated on the server
+                    'timestamp': time.time()
+                }
+                return result
 
-            # Custom structure handling - for serialized PyTorchSGDClassifier
-            elif 'model' in reference_model:
-                logger.info("Detected nested model structure")
-
-                if isinstance(reference_model['model'], dict):
-                    inner_model = reference_model['model']
-
-                    # Check inner model structure
-                    logger.info(f"Inner model keys: {list(inner_model.keys())}")
-
-                    if 'state_dict' in inner_model:
-                        # Handle nested state_dict
-                        averaged_state = {}
-                        for key, value in inner_model['state_dict'].items():
-                            averaged_state[key] = np.zeros_like(np.array(value))
-
-                        for client_id, model_dict in models.items():
-                            weight = sample_counts[client_id] / total_samples
-                            inner = model_dict['model']['state_dict']
-                            for key in averaged_state:
-                                averaged_state[key] += np.array(inner[key]) * weight
-
-                        logger.info("Successfully averaged nested PyTorch model")
-                        return {'model': {'state_dict': averaged_state}}
-
-                    # Another possibility - direct parameters in the inner model
-                    elif any(key.endswith('.weight') or key.endswith('.bias') for key in inner_model.keys()):
-                        averaged_inner = {}
-                        for key, value in inner_model.items():
-                            averaged_inner[key] = np.zeros_like(np.array(value))
-
-                        for client_id, model_dict in models.items():
-                            weight = sample_counts[client_id] / total_samples
-                            inner = model_dict['model']
-                            for key in averaged_inner:
-                                averaged_inner[key] += np.array(inner[key]) * weight
-
-                        logger.info("Successfully averaged nested PyTorch parameters")
-                        return {'model': averaged_inner}
-
-            # If we reach here, no recognized structure was found
-            logger.error(f"Unrecognized model dictionary structure with keys: {list(reference_model.keys())}")
-            return False
-
+            except Exception as e:
+                logger.error(f"Error averaging PyTorch models: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return False
         else:
-            logger.error(f"Unsupported model type: {type(reference_model)}")
+            logger.error("PyTorchSGDClassifier doesn't have state_dict method")
             return False
 
     except Exception as e:
@@ -959,7 +918,6 @@ def federated_averaging(models, sample_counts, model_type=None):
         import traceback
         logger.error(traceback.format_exc())
         return False
-
 
 def evaluate_model(model, X_test, y_test):
     """
