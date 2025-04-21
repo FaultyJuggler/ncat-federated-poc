@@ -825,108 +825,106 @@ def federated_averaging(models, sample_counts):
     Perform weighted federated averaging on client models.
 
     Args:
-        models: Dictionary mapping client IDs to their models (or model dictionaries)
+        models: Dictionary mapping client IDs to their model dictionaries
         sample_counts: Dictionary mapping client IDs to their sample counts
 
     Returns:
         True if successful, False otherwise
     """
-    global global_model
+    global global_model, model_type
 
     try:
         if not models:
             logger.warning("No models to average")
             return False
 
-        # Get the first model as reference
+        # Get reference model and check what keys it contains
         reference_model = next(iter(models.values()))
+        logger.debug(f"Model keys: {list(reference_model.keys())}")
 
-        # Check if models are dictionaries (serialized form) or actual model objects
-        is_dict_model = isinstance(reference_model, dict)
+        total_samples = sum(sample_counts.values())
+        if total_samples <= 0:
+            logger.warning("Total sample count is zero or negative")
+            return False
 
-        # For scikit-learn models
-        if is_dict_model and "coef_" in reference_model:
-            # For serialized scikit-learn models
-            coef = np.zeros_like(reference_model["coef_"])
-            intercept = np.zeros_like(reference_model["intercept_"])
+        # Handle different model types based on the dictionary structure and global model_type
+        if model_type == 'pytorch_sgd':
+            # Model is likely a PyTorch model dictionary
+            if 'state_dict' in reference_model:
+                # Get state dict structure from first model
+                averaged_state = {}
+                for key, value in reference_model['state_dict'].items():
+                    # Initialize with zeros of the same shape
+                    if isinstance(value, np.ndarray):
+                        averaged_state[key] = np.zeros_like(value)
+                    else:
+                        # Convert to numpy if it's not already
+                        averaged_state[key] = np.zeros_like(np.array(value))
 
-            total_samples = sum(sample_counts.values())
-            for client_id, model_dict in models.items():
-                weight = sample_counts[client_id] / total_samples
-                coef += model_dict["coef_"] * weight
-                intercept += model_dict["intercept_"] * weight
+                # Weighted average of parameters
+                for client_id, model_dict in models.items():
+                    weight = sample_counts[client_id] / total_samples
+                    client_state = model_dict['state_dict']
 
-            # Update the global model parameters
-            if hasattr(global_model, "coef_"):
-                global_model.coef_ = coef
-                global_model.intercept_ = intercept
+                    for key in averaged_state:
+                        if isinstance(client_state[key], np.ndarray):
+                            averaged_state[key] += client_state[key] * weight
+                        else:
+                            # Convert to numpy if needed
+                            averaged_state[key] += np.array(client_state[key]) * weight
+
+                # Update the global model
+                from copy import deepcopy
+
+                # Option 1: If global_model is a PyTorchSGDClassifier object
+                if hasattr(global_model, 'load_state_dict'):
+                    # Convert numpy arrays back to appropriate tensor types if needed
+                    global_model.load_state_dict(averaged_state)
+
+                # Option 2: If global_model is also a dictionary
+                elif isinstance(global_model, dict) and 'state_dict' in global_model:
+                    global_model['state_dict'] = deepcopy(averaged_state)
+
+                else:
+                    logger.error("Global model doesn't support state_dict operations")
+                    return False
             else:
-                logger.error("Global model doesn't have the expected attributes")
+                logger.error("PyTorch model dictionary doesn't contain expected 'state_dict' key")
                 return False
 
-        # For PyTorch models
-        elif is_dict_model and "state_dict" in reference_model:
-            # For serialized PyTorch models
-            total_samples = sum(sample_counts.values())
+        elif model_type == 'sgd' or 'coef_' in reference_model:
+            # Model is likely a sklearn-type model dictionary
+            if 'coef_' in reference_model and 'intercept_' in reference_model:
+                # Initialize with zeros
+                coef = np.zeros_like(reference_model['coef_'])
+                intercept = np.zeros_like(reference_model['intercept_'])
 
-            # Get the state dictionary structure from the reference model
-            state_dict = reference_model["state_dict"]
-            averaged_state = {}
+                # Weighted average
+                for client_id, model_dict in models.items():
+                    weight = sample_counts[client_id] / total_samples
+                    coef += model_dict['coef_'] * weight
+                    intercept += model_dict['intercept_'] * weight
 
-            # Initialize averaged state with zeros
-            for key, tensor in state_dict.items():
-                averaged_state[key] = np.zeros_like(tensor)
-
-            # Perform weighted averaging
-            for client_id, model_dict in models.items():
-                weight = sample_counts[client_id] / total_samples
-                client_state = model_dict["state_dict"]
-
-                for key in averaged_state.keys():
-                    averaged_state[key] += client_state[key] * weight
-
-            # Update the global model
-            if hasattr(global_model, "load_state_dict") and hasattr(global_model, "state_dict"):
-                # Convert numpy arrays back to tensors if needed
-                global_model.load_state_dict(averaged_state)
+                # Update global model
+                if hasattr(global_model, 'coef_'):
+                    # If global_model is a model object
+                    global_model.coef_ = coef
+                    global_model.intercept_ = intercept
+                elif isinstance(global_model, dict):
+                    # If global_model is a dictionary
+                    global_model['coef_'] = coef
+                    global_model['intercept_'] = intercept
+                else:
+                    logger.error("Global model doesn't have coef_ attribute")
+                    return False
             else:
-                logger.error("Global model doesn't support state_dict operations")
+                logger.error("SGD model dictionary doesn't contain expected 'coef_' and 'intercept_' keys")
                 return False
-
-        # For actual model objects (not dictionaries)
-        elif hasattr(reference_model, 'coef_'):
-            # For scikit-learn models
-            total_samples = sum(sample_counts.values())
-            coef = np.zeros_like(reference_model.coef_)
-            intercept = np.zeros_like(reference_model.intercept_)
-
-            for client_id, model in models.items():
-                weight = sample_counts[client_id] / total_samples
-                coef += model.coef_ * weight
-                intercept += model.intercept_ * weight
-
-            global_model.coef_ = coef
-            global_model.intercept_ = intercept
-
-        elif hasattr(reference_model, 'state_dict'):
-            # For PyTorch models
-            total_samples = sum(sample_counts.values())
-            global_state = global_model.state_dict()
-
-            # Zero out parameters
-            for key in global_state:
-                global_state[key].zero_()
-
-            # Weighted average
-            for client_id, model in models.items():
-                weight = sample_counts[client_id] / total_samples
-                client_state = model.state_dict()
-
-                for key in global_state:
-                    global_state[key] += client_state[key] * weight
 
         else:
-            logger.error(f"Unsupported model type: {type(reference_model)}")
+            # Add debugging to understand what we're dealing with
+            logger.error(f"Unsupported model type: {model_type}")
+            logger.error(f"Model dictionary keys: {list(reference_model.keys())}")
             return False
 
         logger.info("Federated averaging completed successfully")
@@ -937,7 +935,6 @@ def federated_averaging(models, sample_counts):
         import traceback
         logger.error(traceback.format_exc())
         return False
-
 
 def evaluate_model(model, X_test, y_test):
     """
