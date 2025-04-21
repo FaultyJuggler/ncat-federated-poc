@@ -822,59 +822,120 @@ def merge_models(models, model_types, sample_counts):
 
 def federated_averaging(models, sample_counts):
     """
-    Perform federated averaging on PyTorch models
+    Perform weighted federated averaging on client models.
 
     Args:
-        models: List of PyTorchSGDClassifier models
-        sample_counts: List of sample counts for each model for weighted averaging
+        models: Dictionary mapping client IDs to their models (or model dictionaries)
+        sample_counts: Dictionary mapping client IDs to their sample counts
 
     Returns:
-        PyTorchSGDClassifier: Merged model
+        True if successful, False otherwise
     """
+    global global_model
+
     try:
         if not models:
-            raise ValueError("No models provided for federated averaging")
+            logger.warning("No models to average")
             return False
 
-        # Get the first model to determine type
+        # Get the first model as reference
         reference_model = next(iter(models.values()))
 
-        # Initialize with the same hyperparameters
-        global_model = PyTorchSGDClassifier(**reference_model.get_params())
+        # Check if models are dictionaries (serialized form) or actual model objects
+        is_dict_model = isinstance(reference_model, dict)
 
-        # Set required attributes
-        global_model.classes_ = reference_model.classes_
-        global_model.n_features_in_ = reference_model.n_features_in_
+        # For scikit-learn models
+        if is_dict_model and "coef_" in reference_model:
+            # For serialized scikit-learn models
+            coef = np.zeros_like(reference_model["coef_"])
+            intercept = np.zeros_like(reference_model["intercept_"])
 
-        # Initialize the model with the same architecture
-        n_classes = len(reference_model.classes_)
-        global_model._initialize_model(reference_model.n_features_in_, n_classes)
+            total_samples = sum(sample_counts.values())
+            for client_id, model_dict in models.items():
+                weight = sample_counts[client_id] / total_samples
+                coef += model_dict["coef_"] * weight
+                intercept += model_dict["intercept_"] * weight
 
-        # Copy the scaler from the reference model
-        global_model.scaler = reference_model.scaler
-        global_model.scaler_fitted_ = hasattr(reference_model, 'scaler_fitted_')
+            # Update the global model parameters
+            if hasattr(global_model, "coef_"):
+                global_model.coef_ = coef
+                global_model.intercept_ = intercept
+            else:
+                logger.error("Global model doesn't have the expected attributes")
+                return False
 
-        # Calculate the total number of samples
-        total_samples = sum(sample_counts)
+        # For PyTorch models
+        elif is_dict_model and "state_dict" in reference_model:
+            # For serialized PyTorch models
+            total_samples = sum(sample_counts.values())
 
-        # Create dictionary to hold the sums of parameters
-        global_dict = {}
-        for name, param in global_model.model.state_dict().items():
-            global_dict[name] = torch.zeros_like(param)
+            # Get the state dictionary structure from the reference model
+            state_dict = reference_model["state_dict"]
+            averaged_state = {}
 
-        # Weighted average of parameters
-        for model, sample_count in zip(models, sample_counts):
-            weight = sample_count / total_samples
-            for name, param in model.model.state_dict().items():
-                global_dict[name] += param.data * weight
+            # Initialize averaged state with zeros
+            for key, tensor in state_dict.items():
+                averaged_state[key] = np.zeros_like(tensor)
 
-        # Update the global model with the averaged parameters
-        global_model.model.load_state_dict(global_dict)
+            # Perform weighted averaging
+            for client_id, model_dict in models.items():
+                weight = sample_counts[client_id] / total_samples
+                client_state = model_dict["state_dict"]
 
+                for key in averaged_state.keys():
+                    averaged_state[key] += client_state[key] * weight
+
+            # Update the global model
+            if hasattr(global_model, "load_state_dict") and hasattr(global_model, "state_dict"):
+                # Convert numpy arrays back to tensors if needed
+                global_model.load_state_dict(averaged_state)
+            else:
+                logger.error("Global model doesn't support state_dict operations")
+                return False
+
+        # For actual model objects (not dictionaries)
+        elif hasattr(reference_model, 'coef_'):
+            # For scikit-learn models
+            total_samples = sum(sample_counts.values())
+            coef = np.zeros_like(reference_model.coef_)
+            intercept = np.zeros_like(reference_model.intercept_)
+
+            for client_id, model in models.items():
+                weight = sample_counts[client_id] / total_samples
+                coef += model.coef_ * weight
+                intercept += model.intercept_ * weight
+
+            global_model.coef_ = coef
+            global_model.intercept_ = intercept
+
+        elif hasattr(reference_model, 'state_dict'):
+            # For PyTorch models
+            total_samples = sum(sample_counts.values())
+            global_state = global_model.state_dict()
+
+            # Zero out parameters
+            for key in global_state:
+                global_state[key].zero_()
+
+            # Weighted average
+            for client_id, model in models.items():
+                weight = sample_counts[client_id] / total_samples
+                client_state = model.state_dict()
+
+                for key in global_state:
+                    global_state[key] += client_state[key] * weight
+
+        else:
+            logger.error(f"Unsupported model type: {type(reference_model)}")
+            return False
+
+        logger.info("Federated averaging completed successfully")
         return True
 
     except Exception as e:
-        logging.error(f"Error in federated averaging: {str(e)}")
+        logger.error(f"Error in federated averaging: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 
