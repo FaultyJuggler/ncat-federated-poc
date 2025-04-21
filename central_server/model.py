@@ -850,78 +850,51 @@ def federated_averaging(models, sample_counts, model_type=None):
         # Now we have the actual model objects, we can average them
         reference_model = next(iter(model_objects.values()))
 
-        # Let's inspect the first model to see what attributes it has
-        logger.info(f"PyTorchSGDClassifier attributes: {dir(reference_model)}")
+        # Get the internal PyTorch model's state dict
+        ref_state_dict = reference_model.model.state_dict()
 
-        # Since we know it doesn't have state_dict, let's try accessing the underlying PyTorch model
-        # Most likely, PyTorchSGDClassifier has an internal model attribute
-        if hasattr(reference_model, 'model'):
-            # Get the internal PyTorch model
-            logger.info(f"Internal model type: {type(reference_model.model)}")
+        # Initialize the averaged state dict with zeros
+        import torch
+        averaged_state = {}
+        for key, value in ref_state_dict.items():
+            # Move tensor to CPU before converting to numpy
+            cpu_value = value.cpu()
+            averaged_state[key] = np.zeros_like(cpu_value.numpy())
 
-            # Check if the internal model has state_dict
-            if hasattr(reference_model.model, 'state_dict'):
-                # Now we can average the internal models
-                ref_state_dict = reference_model.model.state_dict()
+        # Weighted average of parameters
+        total_samples = sum(sample_counts.values())
+        for client_id, model in model_objects.items():
+            weight = sample_counts[client_id] / total_samples
+            state_dict = model.model.state_dict()
 
-                # Initialize the averaged state dict with zeros
-                averaged_state = {}
-                for key, value in ref_state_dict.items():
-                    if hasattr(value, 'numpy'):
-                        averaged_state[key] = np.zeros_like(value.cpu().numpy())
-                    else:
-                        averaged_state[key] = np.zeros_like(np.array(value))
+            for key in averaged_state:
+                param = state_dict[key].cpu()  # Move to CPU
+                averaged_state[key] += param.numpy() * weight
 
-                # Weighted average of parameters
-                total_samples = sum(sample_counts.values())
-                for client_id, model in model_objects.items():
-                    weight = sample_counts[client_id] / total_samples
-                    state_dict = model.model.state_dict()
+        # Create a new model with the averaged parameters
+        import copy
 
-                    for key in averaged_state:
-                        param = state_dict[key]
-                        if hasattr(param, 'numpy'):
-                            averaged_state[key] += param.numpy() * weight
-                        else:
-                            averaged_state[key] += np.array(param) * weight
+        averaged_model = copy.deepcopy(reference_model)
 
-                # Create a new model with the averaged parameters
-                import copy
-                import torch
+        # Convert numpy arrays back to tensors and move to original device
+        device = next(averaged_model.model.parameters()).device
+        torch_state_dict = {}
+        for key, value in averaged_state.items():
+            torch_state_dict[key] = torch.tensor(value, device=device)
 
-                averaged_model = copy.deepcopy(reference_model)
+        # Load the averaged parameters into the internal model
+        averaged_model.model.load_state_dict(torch_state_dict)
 
-                # Convert numpy arrays back to tensors
-                torch_state_dict = {}
-                for key, value in averaged_state.items():
-                    torch_state_dict[key] = torch.tensor(value)
+        logger.info("Successfully averaged PyTorchSGDClassifier models")
 
-                # Load the averaged parameters into the internal model
-                averaged_model.model.load_state_dict(torch_state_dict)
-
-                logger.info("Successfully averaged PyTorchSGDClassifier models")
-
-                # Package the result similar to the input dictionaries
-                result = {
-                    'model': averaged_model,
-                    'sample_count': sum(sample_counts.values()),
-                    'metrics': {},
-                    'timestamp': time.time()
-                }
-                return result
-            else:
-                # Try direct parameter access if state_dict is not available
-                logger.info(f"Internal model attributes: {dir(reference_model.model)}")
-
-                # Just log the structure to guide the next iteration
-                return False
-        else:
-            # If there's no internal model, try direct parameter averaging
-            logger.error("PyTorchSGDClassifier doesn't have 'model' attribute")
-
-            # Log more details about the class to understand its structure
-            logger.info(f"Class variables: {vars(reference_model)}")
-            return False
+        # Package the result similar to the input dictionaries
+        result = {
+            'model': averaged_model,
+            'sample_count': sum(sample_counts.values()),
+            'metrics': {},
+            'timestamp': time.time()
+        }
+        return result
 
     except Exception as e:
         logger.error(f"Error in federated averaging: {str(e)}")
