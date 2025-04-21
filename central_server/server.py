@@ -355,6 +355,8 @@ def initialize_global_model(X_sample=None, y_sample=None):
 
     # Get unique classes from sample labels
     unique_classes = np.unique(y_sample)
+    n_features = X_sample.shape[1]
+    n_classes = len(unique_classes)
 
     # Get optimized model configuration
     model_config = optimize_model_params(platform_config)
@@ -403,35 +405,53 @@ def initialize_global_model(X_sample=None, y_sample=None):
 
     # Default to SGD model (preferred)
     else:
-        # global_model = create_sgd_model(model_config)
-        global_model = PyTorchSGDClassifier(
-            loss='log_loss',
-            penalty='l2',
-            alpha=0.001,  # Increased regularization
-            max_iter=200,  # More iterations
-            tol=1e-4,  # Lower tolerance for better convergence
-            random_state=42,
-            learning_rate=0.005,  # Lower learning rate for stability
-            batch_size=64  # Larger batch size for better convergence
-        )
-
-        # Ensure the number of inputs/outputs match before calling partial_fit
-        # First log the shapes to help with debugging
-        logger.info(f"X_sample shape: {X_sample.shape}, y_sample shape: {y_sample.shape}, classes: {unique_classes}")
-
         try:
-            # Call partial_fit with sample data to initialize the model
-            global_model.partial_fit(X_sample, y_sample, classes=unique_classes)
-            logger.info("Successfully initialized PyTorchSGDClassifier model")
+            # global_model = create_sgd_model(model_config)
+            global_model = PyTorchSGDClassifier(
+                loss='log_loss',
+                penalty='l2',
+                alpha=0.001,  # Increased regularization
+                max_iter=200,  # More iterations
+                tol=1e-4,  # Lower tolerance for better convergence
+                random_state=42,
+                learning_rate=0.005,  # Lower learning rate for stability
+                batch_size=64  # Larger batch size for better convergence
+            )
+
+            # Log model info
+            logger.info(f"Initializing PyTorch model with X shape: {X_sample.shape}, y shape: {y_sample.shape}")
+            logger.info(f"Features: {n_features}, Classes: {n_classes}, class balance: {np.bincount(y_sample)}")
+
+            # Adapt to your PyTorchSGDClassifier implementation
+            try:
+                # First try: initialize directly with the parameters needed
+                if hasattr(global_model, '_initialize_model') and callable(getattr(global_model, '_initialize_model')):
+                    # Set attributes directly before calling initialize
+                    global_model.n_features_in_ = n_features
+                    global_model.classes_ = unique_classes
+
+                    # Try to call _initialize_model with required parameters
+                    global_model._initialize_model(n_features=n_features, n_classes=n_classes)
+                    logger.info("Initialized PyTorch model directly with parameters")
+
+                # Then call partial_fit with sample data
+                global_model.partial_fit(X_sample, y_sample, classes=unique_classes)
+                logger.info("Successfully initialized PyTorchSGDClassifier model")
+            except TypeError as e:
+                logger.error(f"Error initializing PyTorchSGDClassifier: {e}")
+                # Fall back to sklearn's SGDClassifier
+                global_model = create_sgd_model(model_config)
+                global_model.partial_fit(X_sample, y_sample, classes=unique_classes)
+                logger.info("Falling back to sklearn SGDClassifier model")
         except Exception as e:
-            logger.error(f"Error initializing PyTorchSGDClassifier: {e}")
-            # Fallback to sklearn SGDClassifier
+            logger.error(f"PyTorch model initialization failed: {e}")
+            # Fall back to sklearn's SGDClassifier
             global_model = create_sgd_model(model_config)
             global_model.partial_fit(X_sample, y_sample, classes=unique_classes)
-            logger.info("Falling back to sklearn SGDClassifier")
+            logger.info("Falling back to sklearn SGDClassifier model")
 
-    logger.info("Initialized PyTorchSGDClassifier model (preferred for federated learning)")
     return True
+
 
 def serialize_model(model):
     """
