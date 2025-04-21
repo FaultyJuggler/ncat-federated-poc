@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import logging
 import threading
@@ -10,7 +11,7 @@ import base64
 from flask import Flask, jsonify, request, Response
 import sys
 
-from model import PyTorchSGDClassifier
+from model import PyTorchSGDClassifier, federated_averaging
 
 # Add paths for imports
 sys.path.append('/')  # Add root directory to path for Docker container
