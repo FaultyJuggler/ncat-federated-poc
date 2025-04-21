@@ -574,7 +574,7 @@ def upload_model():
                 # Create equal weights for all clients
                 client_sample_counts = {client_id: 1 for client_id in client_models.keys()}
 
-                if federated_averaging(client_models, client_sample_counts):
+                if federated_averaging(client_models, client_sample_counts, model_type):
                     # Create metrics for this round
                     metrics = {
                         'participating_clients': len(client_models),

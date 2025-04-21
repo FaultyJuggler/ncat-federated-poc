@@ -820,19 +820,19 @@ def merge_models(models, model_types, sample_counts):
         raise ValueError(f"Unsupported model type for merging: {model_type}")
 
 
-def federated_averaging(models, sample_counts):
+# In model.py
+def federated_averaging(models, sample_counts, model_type=None):
     """
     Perform weighted federated averaging on client models.
 
     Args:
         models: Dictionary mapping client IDs to their model dictionaries
         sample_counts: Dictionary mapping client IDs to their sample counts
+        model_type: String indicating the type of model ('pytorch_sgd', 'sgd', etc.)
 
     Returns:
         True if successful, False otherwise
     """
-    global global_model, model_type
-
     try:
         if not models:
             logger.warning("No models to average")
@@ -847,7 +847,22 @@ def federated_averaging(models, sample_counts):
             logger.warning("Total sample count is zero or negative")
             return False
 
-        # Handle different model types based on the dictionary structure and global model_type
+        # Determine model type if not provided
+        if model_type is None:
+            # Try to infer from dictionary structure
+            if isinstance(reference_model, dict):
+                if 'state_dict' in reference_model:
+                    model_type = 'pytorch_sgd'
+                elif 'coef_' in reference_model:
+                    model_type = 'sgd'
+                else:
+                    logger.error(f"Unable to determine model type from dictionary keys: {list(reference_model.keys())}")
+                    return False
+            else:
+                logger.error(f"Unable to determine model type for object of type: {type(reference_model)}")
+                return False
+
+        # Handle different model types
         if model_type == 'pytorch_sgd':
             # Model is likely a PyTorch model dictionary
             if 'state_dict' in reference_model:
@@ -876,18 +891,10 @@ def federated_averaging(models, sample_counts):
                 # Update the global model
                 from copy import deepcopy
 
-                # Option 1: If global_model is a PyTorchSGDClassifier object
-                if hasattr(global_model, 'load_state_dict'):
-                    # Convert numpy arrays back to appropriate tensor types if needed
-                    global_model.load_state_dict(averaged_state)
+                # For now, just return the averaged state
+                # The server should handle updating the global model
+                return {'state_dict': averaged_state}
 
-                # Option 2: If global_model is also a dictionary
-                elif isinstance(global_model, dict) and 'state_dict' in global_model:
-                    global_model['state_dict'] = deepcopy(averaged_state)
-
-                else:
-                    logger.error("Global model doesn't support state_dict operations")
-                    return False
             else:
                 logger.error("PyTorch model dictionary doesn't contain expected 'state_dict' key")
                 return False
@@ -905,18 +912,9 @@ def federated_averaging(models, sample_counts):
                     coef += model_dict['coef_'] * weight
                     intercept += model_dict['intercept_'] * weight
 
-                # Update global model
-                if hasattr(global_model, 'coef_'):
-                    # If global_model is a model object
-                    global_model.coef_ = coef
-                    global_model.intercept_ = intercept
-                elif isinstance(global_model, dict):
-                    # If global_model is a dictionary
-                    global_model['coef_'] = coef
-                    global_model['intercept_'] = intercept
-                else:
-                    logger.error("Global model doesn't have coef_ attribute")
-                    return False
+                # Return averaged model parameters
+                return {'coef_': coef, 'intercept_': intercept}
+
             else:
                 logger.error("SGD model dictionary doesn't contain expected 'coef_' and 'intercept_' keys")
                 return False
@@ -926,9 +924,6 @@ def federated_averaging(models, sample_counts):
             logger.error(f"Unsupported model type: {model_type}")
             logger.error(f"Model dictionary keys: {list(reference_model.keys())}")
             return False
-
-        logger.info("Federated averaging completed successfully")
-        return True
 
     except Exception as e:
         logger.error(f"Error in federated averaging: {str(e)}")
