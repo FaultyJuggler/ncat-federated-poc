@@ -95,13 +95,24 @@ class PyTorchSGDClassifier(BaseEstimator, ClassifierMixin):
 
     def _initialize_model(self, n_features, n_classes):
         """Initialize PyTorch model and optimizer."""
-        # For binary classification
-        out_features = 1 if n_classes <= 2 else n_classes
+        # For binary classification, output dimension should be 1
+        n_classes = 1 if len(self.classes_) == 2 else len(self.classes_)
 
-        # Create model
+        # Create a simple network with appropriate dimensions
         self.model = torch.nn.Sequential(
-            torch.nn.Linear(n_features, out_features)
+            torch.nn.Linear(self.n_features_in_, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, n_classes)
         ).to(self.device)
+
+        # Use binary cross entropy with class weights for binary classification
+        if len(self.classes_) == 2:
+            # Calculate class weights if necessary (can also be passed as a parameter)
+            # For imbalanced data, try setting weight for minority class higher
+            pos_weight = torch.tensor([3.0]).to(self.device)  # Adjust based on your class ratio
+            self.criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        else:
+            self.criterion = torch.nn.CrossEntropyLoss()
 
         # Setup optimizer with regularization
         weight_decay = self.alpha if self.penalty == 'l2' else 0
@@ -121,18 +132,32 @@ class PyTorchSGDClassifier(BaseEstimator, ClassifierMixin):
 
         self.initialized_ = True
 
-    def _prepare_data(self, X, y=None):
-        """Convert numpy arrays to PyTorch tensors."""
+    def _prepare_data(self, X, y):
+        # Convert to numpy if not already
+        X = np.asarray(X)
+        y = np.asarray(y)
+
+        # Initialize scaler if not done
+        if not hasattr(self, 'scaler') or self.scaler is None:
+            self.scaler = StandardScaler()
+
+        # Fit scaler on first call
+        if not hasattr(self, 'scaler_fitted_') or not self.scaler_fitted_:
+            X = self.scaler.fit_transform(X)
+            self.scaler_fitted_ = True
+        else:
+            X = self.scaler.transform(X)
+
+        # Convert to PyTorch tensors
         X_tensor = torch.FloatTensor(X).to(self.device)
 
-        if y is not None:
-            if len(self.classes_) <= 2:  # Binary classification
-                y_tensor = torch.FloatTensor(y).to(self.device)
-            else:  # Multiclass classification
-                y_tensor = torch.LongTensor(y).to(self.device)
-            return X_tensor, y_tensor
+        # Handle target encoding for different loss functions
+        if len(self.classes_) == 2:  # Binary classification
+            y_tensor = torch.FloatTensor(y).to(self.device)
+        else:  # Multi-class classification
+            y_tensor = torch.LongTensor(y).to(self.device)
 
-        return X_tensor
+        return X_tensor, y_tensor
 
     def fit(self, X, y):
         """Fit model to the data."""
@@ -196,46 +221,80 @@ class PyTorchSGDClassifier(BaseEstimator, ClassifierMixin):
         return self
 
     def partial_fit(self, X, y, classes=None):
-        """Incremental fit on a batch of samples."""
+        # Ensure classes are provided for first call or convert from numpy array
         if classes is not None:
-            self.classes_ = classes
+            self.classes_ = np.array(classes)
+        elif not hasattr(self, 'classes_'):
+            self.classes_ = np.unique(y)
 
-        # Initialize the model if this is the first call
-        if not hasattr(self, 'classes_') or self.classes_ is None:
-            self.classes_ = unique_labels(y)
-
-        if not self.initialized_:
+        # Set feature dimension on first call
+        if not hasattr(self, 'n_features_in_'):
             self.n_features_in_ = X.shape[1]
-            self._initialize_model(self.n_features_in_, len(self.classes_))
 
-        # Scale features
-        if not hasattr(self, 'scaler_fitted_'):
-            X = self.scaler.fit_transform(X)
-            self.scaler_fitted_ = True
-        else:
-            X = self.scaler.transform(X)
+        # Initialize model if not already done
+        if not hasattr(self, 'model') or self.model is None:
+            self._initialize_model()
 
-        # Convert class labels
-        if len(self.classes_) > 2:
-            y_mapped = np.searchsorted(self.classes_, y)
-        else:
-            y_mapped = (y == self.classes_[1]).astype(np.float32)
+        # Initialize optimizer if not already done
+        if not hasattr(self, 'optimizer') or self.optimizer is None:
+            self.optimizer = torch.optim.SGD(
+                self.model.parameters(),
+                lr=self.learning_rate,
+                weight_decay=self.alpha
+            )
 
-        # Convert to PyTorch tensors
-        X_tensor, y_tensor = self._prepare_data(X, y_mapped)
+        # Log key info about the data
+        logger.info(f"Partial fit with X shape: {X.shape}, y shape: {y.shape}, "
+                    f"classes: {self.classes_}, class distribution: {np.bincount(y)}")
 
-        # Training
+        # Prepare batches
+        X_tensor, y_tensor = self._prepare_data(X, y)
+
+        # Training loop
         self.model.train()
-        self.optimizer.zero_grad()
-        outputs = self.model(X_tensor)
 
-        # Reshape output for binary classification
-        if len(self.classes_) <= 2:
-            outputs = outputs.squeeze()
+        # Process in batches to avoid memory issues
+        dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        loss = self.criterion(outputs, y_tensor)
-        loss.backward()
-        self.optimizer.step()
+        # Track metrics
+        total_loss = 0
+        correct = 0
+        total = 0
+
+        for batch_X, batch_y in dataloader:
+            # Forward pass
+            self.optimizer.zero_grad()
+            outputs = self.model(batch_X)
+
+            # Handle output shape based on classification type
+            if len(self.classes_) == 2:  # Binary classification
+                outputs = outputs.view(-1)  # Ensure outputs are flattened for BCE loss
+                loss = self.criterion(outputs, batch_y)
+            else:  # Multi-class
+                loss = self.criterion(outputs, batch_y.long())
+
+            # Backward pass and optimize
+            loss.backward()
+            self.optimizer.step()
+
+            # Update metrics
+            total_loss += loss.item()
+
+            # Calculate batch accuracy
+            if len(self.classes_) == 2:
+                predicted = (outputs >= 0).float()  # Apply sigmoid implicitly with threshold at 0
+            else:
+                _, predicted = torch.max(outputs.data, 1)
+
+            batch_correct = (predicted == batch_y).sum().item()
+            correct += batch_correct
+            total += batch_y.size(0)
+
+        # Log training progress
+        avg_loss = total_loss / len(dataloader)
+        accuracy = 100 * correct / total if total > 0 else 0
+        logger.info(f"Training - Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%")
 
         return self
 
@@ -348,12 +407,12 @@ def initialize_global_model(X_sample=None, y_sample=None):
         global_model = PyTorchSGDClassifier(
             loss='log_loss',
             penalty='l2',
-            alpha=0.0001,
-            max_iter=100,
-            tol=1e-3,
+            alpha=0.001,  # Increased regularization
+            max_iter=200,  # More iterations
+            tol=1e-4,  # Lower tolerance for better convergence
             random_state=42,
-            learning_rate=0.01,
-            batch_size=32
+            learning_rate=0.005,  # Lower learning rate for stability
+            batch_size=64  # Larger batch size for better convergence
         )
 
         # Ensure the number of inputs/outputs match before calling partial_fit
