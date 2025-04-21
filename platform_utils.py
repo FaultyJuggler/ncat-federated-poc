@@ -149,6 +149,8 @@ def optimize_model_params(config):
 
     # Generate params for sklearn SGD
     params = {
+        'model_type': 'sgd',
+        'params': {
             'loss': 'log_loss',  # For classification
             'penalty': 'l2',
             'alpha': 0.0001,
@@ -157,10 +159,11 @@ def optimize_model_params(config):
             'random_state': 42,
             'warm_start': True  # Important for incremental learning
         }
+    }
 
     # Use PyTorch if available
     if has_torch:
-        # Remove sklearn-specific params
+    # Remove sklearn-specific params
         if 'warm_start' in params['params']:
             del params['params']["warm_start"]
 
