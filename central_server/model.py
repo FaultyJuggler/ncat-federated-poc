@@ -834,8 +834,8 @@ def federated_averaging(models, sample_counts):
     if not models:
         raise ValueError("No models provided for federated averaging")
 
-    # Create a new model with the same architecture as the first model
-    reference_model = models[0]
+    # Get the first model to determine type
+    reference_model = next(iter(models.values()))
 
     # Initialize with the same hyperparameters
     global_model = PyTorchSGDClassifier(**reference_model.get_params())
