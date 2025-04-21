@@ -557,7 +557,7 @@ def deserialize_model(serialized_params):
     model_type = serialized_params.get('model_type', 'pytorch_sgd')
     use_gpu = serialized_params.get('use_gpu', platform_config.get('use_gpu', False))
 
-    if model_type == 'pytorch_sgd':
+    if model_type == 'pytorch_sgd' or model_type == 'PyTorchSGDClassifier':
         try:
             # Try to use PyTorch if GPU acceleration is requested
             if use_gpu:
