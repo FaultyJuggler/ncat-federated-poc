@@ -831,45 +831,51 @@ def federated_averaging(models, sample_counts):
     Returns:
         PyTorchSGDClassifier: Merged model
     """
-    if not models:
-        raise ValueError("No models provided for federated averaging")
+    try:
+        if not models:
+            raise ValueError("No models provided for federated averaging")
+            return False
 
-    # Get the first model to determine type
-    reference_model = next(iter(models.values()))
+        # Get the first model to determine type
+        reference_model = next(iter(models.values()))
 
-    # Initialize with the same hyperparameters
-    global_model = PyTorchSGDClassifier(**reference_model.get_params())
+        # Initialize with the same hyperparameters
+        global_model = PyTorchSGDClassifier(**reference_model.get_params())
 
-    # Set required attributes
-    global_model.classes_ = reference_model.classes_
-    global_model.n_features_in_ = reference_model.n_features_in_
+        # Set required attributes
+        global_model.classes_ = reference_model.classes_
+        global_model.n_features_in_ = reference_model.n_features_in_
 
-    # Initialize the model with the same architecture
-    n_classes = len(reference_model.classes_)
-    global_model._initialize_model(reference_model.n_features_in_, n_classes)
+        # Initialize the model with the same architecture
+        n_classes = len(reference_model.classes_)
+        global_model._initialize_model(reference_model.n_features_in_, n_classes)
 
-    # Copy the scaler from the reference model
-    global_model.scaler = reference_model.scaler
-    global_model.scaler_fitted_ = hasattr(reference_model, 'scaler_fitted_')
+        # Copy the scaler from the reference model
+        global_model.scaler = reference_model.scaler
+        global_model.scaler_fitted_ = hasattr(reference_model, 'scaler_fitted_')
 
-    # Calculate the total number of samples
-    total_samples = sum(sample_counts)
+        # Calculate the total number of samples
+        total_samples = sum(sample_counts)
 
-    # Create dictionary to hold the sums of parameters
-    global_dict = {}
-    for name, param in global_model.model.state_dict().items():
-        global_dict[name] = torch.zeros_like(param)
+        # Create dictionary to hold the sums of parameters
+        global_dict = {}
+        for name, param in global_model.model.state_dict().items():
+            global_dict[name] = torch.zeros_like(param)
 
-    # Weighted average of parameters
-    for model, sample_count in zip(models, sample_counts):
-        weight = sample_count / total_samples
-        for name, param in model.model.state_dict().items():
-            global_dict[name] += param.data * weight
+        # Weighted average of parameters
+        for model, sample_count in zip(models, sample_counts):
+            weight = sample_count / total_samples
+            for name, param in model.model.state_dict().items():
+                global_dict[name] += param.data * weight
 
-    # Update the global model with the averaged parameters
-    global_model.model.load_state_dict(global_dict)
+        # Update the global model with the averaged parameters
+        global_model.model.load_state_dict(global_dict)
 
-    return global_model
+        return True
+
+    except Exception as e:
+        logging.error(f"Error in federated averaging: {str(e)}")
+        return False
 
 
 def evaluate_model(model, X_test, y_test):
